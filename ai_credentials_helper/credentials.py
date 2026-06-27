@@ -1,142 +1,76 @@
-"""Shared macOS Keychain + OAuth helpers for Claude Code credentials.
+"""Backend facade for AI-agent credential storage.
 
-Single source of truth for reading/writing the ``Claude Code-credentials``
-Keychain entry and refreshing OAuth tokens. Used by both the usage bar
-(``usage.py``) and the ``claude-monitor-credentials`` CLI
-(``claude_monitor.cli_credentials``).
+The CLI calls ``set_backend(name)`` once based on ``--agent``, then all
+``creds.read_raw()`` / ``creds.write(...)`` calls dispatch to the active
+backend module. This keeps the call sites clean (``from
+ai_credentials_helper import credentials as creds``) while letting each
+agent own its own storage adapter.
 
-stdlib only — shells out to the ``security`` binary (no ``keyring`` dependency),
-matching the rest of the project.
+Default backend is ``claude`` (the original macOS-Keychain helper) so
+existing scripts and tests keep working.
 """
 
-import json
-import subprocess
-import time
-from urllib.request import Request, urlopen
+from ai_credentials_helper.backends import claude, codex, get_backend
 
-KEYCHAIN_SERVICE = "Claude Code-credentials"
-TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Public alias for callers that want to catch the same error regardless of
+# backend — both backends define their own ``CredentialsError``, but they
+# share this name and semantics, so we re-export claude's.
+CredentialsError = claude.CredentialsError
 
-
-class CredentialsError(Exception):
-    """Keychain entry missing, unreadable, or unwritable."""
+_DEFAULT_BACKEND = "claude"
+_backend = claude
 
 
-def _security(args: list[str], *, timeout: int = 5) -> subprocess.CompletedProcess:
-    return subprocess.run(["security", *args], capture_output=True, timeout=timeout)
+def set_backend(name: str) -> None:
+    """Switch the active backend to ``name`` (``claude`` or ``codex``).
 
-
-def read_raw() -> str:
-    """Return the verbatim ``security ... -w`` blob (one trailing newline stripped).
-
-    This is the default-export form — exactly the bytes Claude Code stored,
-    which may be raw JSON or hex-encoded depending on macOS version.
+    Subsequent module-level calls (``read_raw``, ``write``, ``refresh_tokens``,
+    etc.) dispatch to the chosen backend. Raises ``ValueError`` if ``name`` is
+    not a registered backend.
     """
-    proc = _security(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
-    if proc.returncode != 0 or not proc.stdout:
-        raise CredentialsError("No credentials found in Keychain")
-    return proc.stdout.decode("utf-8", errors="replace").rstrip("\n")
+    global _backend
+    _backend = get_backend(name)
 
 
-def parse_blob(raw: str) -> dict:
-    """Parse a keychain blob — raw JSON, or hex-encoded JSON — into a dict.
+def backend_name() -> str:
+    """Return the active backend's name (``claude`` / ``codex``)."""
+    return _backend.name  # type: ignore[no-any-return]
 
-    These are the two forms Claude Code stores (see :func:`read_raw`). Raises
-    ``ValueError`` if ``raw`` is neither. Used to validate a *received* blob
-    before writing it, so a garbage payload can't overwrite the keychain entry.
+
+def backend_label() -> str:
+    """Return the active backend's human label for error messages."""
+    return _backend.label  # type: ignore[no-any-return]
+
+
+# Dynamic dispatch — every name in __all__ resolves to the active backend.
+# The implementation is per-call so callers don't need to remember which
+# backend is active; the facade handles it transparently.
+__all__ = [
+    "CredentialsError",
+    "KEYCHAIN_SERVICE",
+    "TOKEN_URL",
+    "CLIENT_ID",
+    "set_backend",
+    "backend_name",
+    "backend_label",
+    "read_raw",
+    "read_json",
+    "write",
+    "find_account",
+    "extract_oauth_tokens",
+    "refresh_tokens",
+    "oauth_only_json",
+]
+
+
+def __getattr__(name: str):
+    """Module-level __getattr__ dispatches unknown names to the active backend.
+
+    This is how ``creds.read_raw()`` resolves to whichever backend's
+    ``read_raw`` was set by the most recent ``set_backend`` call. Names in
+    ``__all__`` are documented above; everything else raises ``AttributeError``
+    so typos surface immediately rather than silently dispatching.
     """
-    text = raw if raw.startswith("{") else bytes.fromhex(raw).decode("utf-8")
-    return json.loads(text)
-
-
-def read_json() -> dict:
-    """Read the keychain blob and parse it as JSON, decoding hex if needed."""
-    raw = read_raw()
-    text = raw if raw.startswith("{") else bytes.fromhex(raw).decode("utf-8", errors="replace")
-    return json.loads(text)
-
-
-def oauth_only_json() -> str:
-    """Return only the ``claudeAiOauth`` section as compact JSON (no trailing newline).
-
-    Drops ``mcpOAuth`` and any other machine-specific keys — for sharing
-    credentials between machines.
-    """
-    data = read_json()
-    return json.dumps({"claudeAiOauth": data.get("claudeAiOauth")}, separators=(",", ":"))
-
-
-def find_account() -> str | None:
-    """Discover the account name of the existing keychain entry, or None."""
-    proc = _security(["find-generic-password", "-s", KEYCHAIN_SERVICE])
-    if proc.returncode != 0:
-        return None
-    for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
-        if '"acct"' in line and "<blob>=" in line:
-            return line.split("<blob>=")[1].strip().strip('"')
-    return None
-
-
-def write(content: str) -> None:
-    """Write ``content`` verbatim to the keychain, replacing the existing entry.
-
-    Requires an existing entry (so the account name can be discovered) — i.e.
-    ``claude login`` must have run on this Mac at least once.
-    """
-    account = find_account()
-    if not account:
-        raise CredentialsError(
-            f"No existing keychain entry for service '{KEYCHAIN_SERVICE}'. "
-            "Run 'claude login' first."
-        )
-    proc = _security(
-        ["add-generic-password", "-U", "-a", account, "-s", KEYCHAIN_SERVICE, "-w", content]
-    )
-    if proc.returncode != 0:
-        raise CredentialsError(
-            f"Keychain write failed: {proc.stderr.decode('utf-8', errors='replace').strip()}"
-        )
-
-
-def tokens_from_data(data: dict) -> tuple[str, str, float] | None:
-    """Extract ``(access_token, refresh_token, expires_at_epoch)`` from a parsed blob, or None."""
-    oauth = data.get("claudeAiOauth", {})
-    token = oauth.get("accessToken")
-    if not token:
-        return None
-    expires_at = oauth.get("expiresAt")
-    expires_at = expires_at / 1000 if expires_at else time.time() + 3600
-    return token, oauth.get("refreshToken") or "", expires_at
-
-
-def extract_oauth_tokens() -> tuple[str, str, float] | None:
-    """Return ``(access_token, refresh_token, expires_at_epoch)`` from the keychain, or None."""
-    try:
-        data = read_json()
-    except (CredentialsError, ValueError, json.JSONDecodeError):
-        return None
-    return tokens_from_data(data)
-
-
-def refresh_tokens(refresh_token: str) -> tuple[str, str, int] | None:
-    """Exchange a refresh token for a new access token via the OAuth endpoint.
-
-    Returns ``(access_token, refresh_token, expires_in_seconds)`` or None if no
-    refresh token was given or the response lacked an access token. Network
-    errors propagate to the caller.
-    """
-    if not refresh_token:
-        return None
-    payload = json.dumps(
-        {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID}
-    ).encode()
-    req = Request(
-        TOKEN_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    with urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    new_access = data.get("access_token")
-    if not new_access:
-        return None
-    return new_access, data.get("refresh_token", refresh_token), data.get("expires_in", 3600)
+    if name in __all__ and name not in globals():
+        return getattr(_backend, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

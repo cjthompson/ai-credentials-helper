@@ -1,11 +1,16 @@
-"""Unit tests for the shared keychain/OAuth core (ai_credentials_helper.credentials)."""
+"""Unit tests for the Claude backend (macOS Keychain + OAuth).
+
+Tests import the backend module directly because they patch attributes
+(``subprocess.run``, ``urlopen``) on the backend itself; the facade
+dispatches via ``__getattr__`` so patches on the facade don't propagate.
+"""
 
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from ai_credentials_helper import credentials as creds
+from ai_credentials_helper.backends import claude as creds
 
 OAUTH = {
     "accessToken": "sk-ant-oat-abc",

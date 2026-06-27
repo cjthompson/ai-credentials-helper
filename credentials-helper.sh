@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Manage the Claude Code OAuth token in the macOS Keychain.
 #
-# Usage: ./claude-credentials.sh [--raw | --simple | --refresh | --oauth-only]
-#        ./claude-credentials.sh --import <file|->
-#        ./claude-credentials.sh [--oauth-only] --send <host> [--send-port <port>]
+# This bash version only supports the ``claude`` agent (macOS Keychain).
+# For ``codex`` or other agents, use the Python CLI:
+#     credentials-helper --agent codex --simple
+#
+# Usage: ./credentials-helper.sh [--raw | --simple | --refresh | --oauth-only]
+#        ./credentials-helper.sh --import <file|->
+#        ./credentials-helper.sh [--oauth-only] --send <host> [--send-port <port>]
 
 set -euo pipefail
 
@@ -21,6 +25,7 @@ SEND_PORT="47299"
 RECEIVE_MODE=false
 RECEIVE_PORT="47299"
 VERBOSE=false
+AGENT=""
 
 usage() {
   cat <<EOF
@@ -74,6 +79,8 @@ Modes:
 
   --send-port <port>  Override the destination port for --send (default 47299).
   --port <port>       Override the listening port for --receive (default 47299).
+  --agent <name>      Which agent to operate on (this bash version supports
+                      'claude' only; use the Python CLI for others).
   --verbose           With --receive: on success, print the received token's
                       access_token and expiration in human-readable local time.
 
@@ -89,6 +96,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --agent)
+      [[ $# -ge 2 ]] || { echo "Error: --agent requires an <agent> argument" >&2; exit 1; }
+      AGENT="$2"
+      shift
+      ;;
     --raw)        RAW_OUT=true ;;
     --simple)     SIMPLE_OUT=true ;;
     --oauth-only) OAUTH_ONLY=true ;;
@@ -135,6 +147,15 @@ fi
 
 if $OAUTH_ONLY && { $RAW_OUT || $SIMPLE_OUT || $DO_REFRESH || [[ -n "$IMPORT_PATH" ]] || $RECEIVE_MODE; }; then
   echo "Error: --oauth-only can only be used by itself or with --send" >&2
+  exit 1
+fi
+
+# Bash version is claude-only — defer other agents to the Python CLI, which
+# has the full backend dispatch and codex file-handling logic.
+if [[ -n "$AGENT" && "$AGENT" != "claude" ]]; then
+  echo "Error: this bash version only supports the 'claude' agent." >&2
+  echo "For '$AGENT', use the Python CLI instead:" >&2
+  echo "    credentials-helper --agent $AGENT --simple" >&2
   exit 1
 fi
 

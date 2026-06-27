@@ -7,16 +7,19 @@ and OAuth work is delegated to the shared ``ai_credentials_helper.credentials`` 
 
 Modes (mutually exclusive, except --oauth-only which may accompany --send).
 With no arguments, prints help (it does not dump credentials by default).
-  --raw            Print the raw keychain blob, exactly as stored.
+  --agent <name>   Which agent's credentials to operate on: claude (default)
+                   or codex.
+  --raw            Print the raw stored blob, exactly as stored.
   --simple         Print access_token / refresh_token / expires_at / expires.
-  --oauth-only     Print only the claudeAiOauth section as compact JSON.
+  --oauth-only     Print only the portable token subset as compact JSON.
   --refresh        Refresh the access token, write it back, print --simple form.
-  --import <file|-> Write raw keychain bytes (file or stdin) verbatim.
-  --send <host>    Encrypt the keychain blob and send it to <host> over TCP (the
+                   (Claude only; codex refreshes tokens itself on use.)
+  --import <file|-> Write raw bytes (file or stdin) verbatim.
+  --send <host>    Encrypt the blob and send it to <host> over TCP (the
                    receiver must be running --receive first). With --oauth-only,
-                   send only the claudeAiOauth section.
+                   send only the portable token subset.
   --receive        Accept one TCP connection, verify+decrypt it, and write the
-                   result to the keychain.
+                   result to the active agent's storage.
 
 --send/--receive are end-to-end encrypted with a shared passphrase
 (CLAUDE_CREDENTIALS_PASSPHRASE, or an interactive prompt). Both ends must use
@@ -99,7 +102,13 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-v", "--verbose", action="store_true", help="log diagnostic detail to stderr")
-    p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
+    p.add_argument(
+        "--agent",
+        choices=("claude", "codex"),
+        default="claude",
+        help="which agent's credentials to operate on (default: claude)",
+    )
+    p.add_argument("--raw", action="store_true", help="print the raw stored blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
     p.add_argument("--refresh", action="store_true", help="refresh the access token")
     p.add_argument(
@@ -320,6 +329,10 @@ def _do_refresh(tokens: tuple[str, str, float]) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Activate the chosen backend before any backend call. Unknown names
+    # raise ValueError; argparse already restricts to the choices set.
+    creds.set_backend(args.agent)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
