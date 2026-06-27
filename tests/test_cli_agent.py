@@ -5,17 +5,12 @@ default is claude (back-compat), that unknown agents error cleanly, and that
 ``--refresh --agent codex`` produces the documented "not supported" message.
 """
 
-import io
 import json
-import os
-import sys
-import tempfile
-from pathlib import Path
-from unittest import mock
 
 import pytest
 
-from ai_credentials_helper import cli, credentials as creds
+from ai_credentials_helper import cli
+from ai_credentials_helper import credentials as creds
 
 
 @pytest.fixture
@@ -129,3 +124,16 @@ def test_credentials_facade_re_exposes_known_constants(restore_backend):
     # The facade should expose claude's constants by default for back-compat.
     assert creds.KEYCHAIN_SERVICE == "Claude Code-credentials"
     assert creds.CLIENT_ID == "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+
+def test_parse_blob_dispatches_for_both_backends(restore_backend):
+    """Regression: --receive calls creds.parse_blob after decrypting. The facade
+    must dispatch it for both backends, or AttributeError escapes main() and
+    corrupts the receive path."""
+    sample = '{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1}}'
+    creds.set_backend("claude")
+    assert creds.parse_blob(sample)["claudeAiOauth"]["accessToken"] == "a"
+
+    creds.set_backend("codex")
+    codex_sample = '{"tokens":{"access_token":"a","refresh_token":"r","account_id":"x"}}'
+    assert creds.parse_blob(codex_sample)["tokens"]["account_id"] == "x"

@@ -29,7 +29,6 @@ import json
 import os
 import time
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 from ai_credentials_helper.backends.claude import CredentialsError as ClaudeCredentialsError
 

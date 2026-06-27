@@ -10,7 +10,7 @@ Default backend is ``claude`` (the original macOS-Keychain helper) so
 existing scripts and tests keep working.
 """
 
-from ai_credentials_helper.backends import claude, codex, get_backend
+from ai_credentials_helper.backends import claude, get_backend
 
 # Public alias for callers that want to catch the same error regardless of
 # backend — both backends define their own ``CredentialsError``, but they
@@ -60,6 +60,7 @@ __all__ = [
     "extract_oauth_tokens",
     "refresh_tokens",
     "oauth_only_json",
+    "parse_blob",
 ]
 
 
