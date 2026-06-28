@@ -207,7 +207,10 @@ def _decode_jwt_exp(jwt: str) -> int | None:
     """Return the JWT's ``exp`` claim (seconds since epoch) with no signature check.
 
     Codex tokens are signed JWTs; we only use the ``exp`` field for display,
-    not for trust decisions. Returns None if the JWT can't be parsed.
+    not for trust decisions. Returns None if the JWT can't be parsed OR if
+    ``exp`` is the wrong type (e.g. a string) — ``validate_blob`` then raises
+    a clean :class:`CredentialsError` instead of letting ``int(time.time())``
+    comparison raise ``TypeError`` further up.
     """
     if not jwt or jwt.count(".") != 2:
         return None
@@ -221,7 +224,20 @@ def _decode_jwt_exp(jwt: str) -> int | None:
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
     except (ValueError, json.JSONDecodeError):
         return None
-    return payload.get("exp")
+    # JWT payload MUST be a JSON object (RFC 7519 §4). A list, string, or
+    # number is well-formed JSON but not a valid JWT claim set — return None
+    # so validate_blob() raises a clean CredentialsError instead of letting
+    # ``payload.get(...)`` raise AttributeError further up.
+    if not isinstance(payload, dict):
+        return None
+    exp = payload.get("exp")
+    # RFC 7519 says NumericDate is a JSON number; some real-world issuers
+    # occasionally emit a string. Either way, refuse to return a value
+    # validate_blob() can't safely compare — let it raise CredentialsError
+    # with a useful message rather than TypeError further up.
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    return exp
 
 
 def tokens_from_data(data: dict) -> tuple[str, str, float] | None:

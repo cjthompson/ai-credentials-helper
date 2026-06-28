@@ -288,6 +288,52 @@ def test_write_rejects_unparseable_jwt(tmp_auth, restore_force):
     assert auth_file.read_text() == original
 
 
+def test_write_rejects_string_exp_claim(tmp_auth, restore_force):
+    """A JWT whose ``exp`` is a string must be rejected with a clean
+    CredentialsError, not a TypeError.
+
+    Regression: ``_decode_jwt_exp`` previously returned whatever
+    ``payload.get('exp')`` was, so a JWT like ``{"exp": "1782635025"}`` made
+    it past the decoder and crashed with TypeError in the ``<=`` comparison,
+    leaving the CLI's exception handler the wrong error to format.
+    """
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token=_make_jwt({"sub": "u", "exp": "1782635025"})))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_boolean_exp_claim(tmp_auth, restore_force):
+    """Booleans are ints in Python — guard against JSON ``true`` slipping
+    through isinstance(..., int)."""
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token=_make_jwt({"exp": True})))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_non_object_jwt_payload(tmp_auth, restore_force):
+    """A JWT whose payload is valid JSON but not an object (e.g. ``[]``,
+    ``"payload"``, ``42``) must be rejected with a clean CredentialsError.
+
+    Regression: ``_decode_jwt_exp`` previously called ``payload.get("exp")``
+    on whatever ``json.loads`` returned, so a list/str/int raised
+    ``AttributeError`` instead of a clean rejection — the CLI's exception
+    handler would then print the wrong error message.
+    """
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token=_make_jwt([])))
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token=_make_jwt("payload")))
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token=_make_jwt(42)))
+    assert auth_file.read_text() == original
+
+
 def test_force_bypasses_expiry_check(tmp_auth, restore_force):
     """--force accepts expired tokens; tests/recovery use case."""
     creds.FORCE_WRITE = True

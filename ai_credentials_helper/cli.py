@@ -355,12 +355,18 @@ def main(argv: list[str] | None = None) -> int:
     # raise ValueError; argparse already restricts to the choices set.
     creds.set_backend(args.agent)
 
-    # --force bypasses backend write-time safety checks (e.g. JWT expiry).
-    # Must be set AFTER set_backend (which resets FORCE_WRITE) and BEFORE
-    # any write path. Always warn — bypassing safety should be loud.
-    if args.force:
-        if getattr(creds._backend, "FORCE_WRITE", None) is False:
-            creds._backend.FORCE_WRITE = True
+    error = _validate(args)
+    if error:
+        _err(error)
+        return 1
+
+    # --force only applies to write modes (import/send/receive/refresh) and
+    # only after args validate cleanly. Always warn — bypassing safety should
+    # be loud. Reset FORCE_WRITE in finally so a same-process caller (e.g.
+    # tests, programmatic use) never leaks a forced state forward.
+    is_write = bool(args.import_path or args.send_host or args.receive or args.refresh)
+    if args.force and is_write:
+        creds._backend.FORCE_WRITE = True
         _err("WARNING: --force set; skipping backend write-time safety checks")
 
     logging.basicConfig(
@@ -368,11 +374,6 @@ def main(argv: list[str] | None = None) -> int:
         format="[%(levelname)s] %(message)s",
         stream=sys.stderr,
     )
-
-    error = _validate(args)
-    if error:
-        _err(error)
-        return 1
 
     try:
         if args.import_path:
@@ -402,6 +403,12 @@ def main(argv: list[str] | None = None) -> int:
     except (creds.CredentialsError, OSError) as e:
         _err(f"Error: {e}")
         return 1
+    finally:
+        # Always reset FORCE_WRITE so a stale flag from this invocation can't
+        # leak into the next same-process one (set_backend() also resets, but
+        # this is the in-process safety net for back-to-back main() calls).
+        if getattr(creds._backend, "FORCE_WRITE", None) is True:
+            creds._backend.FORCE_WRITE = False
 
 
 if __name__ == "__main__":

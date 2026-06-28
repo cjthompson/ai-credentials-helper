@@ -6,6 +6,7 @@ default is claude (back-compat), that unknown agents error cleanly, and that
 """
 
 import json
+import sys
 
 import pytest
 
@@ -152,31 +153,37 @@ def test_store_label_uses_backend_specific_noun(restore_backend):
 
 
 def test_force_flag_prints_warning_and_sets_flag(restore_backend, tmp_path, monkeypatch, capsys):
-    """--force emits a stderr warning AND sets codex.FORCE_WRITE = True."""
+    """--force emits a stderr warning AND toggles codex.FORCE_WRITE during the call.
+
+    We can't assert ``codex.FORCE_WRITE is True`` after main() returns: a
+    ``finally`` block resets it so a stale flag can't leak into the next
+    same-process invocation. Instead, spy on ``codex.write`` directly — the
+    facade re-fetches ``_backend`` at each call, so a module-level patch
+    survives the set_backend() inside main().
+    """
+    import io
+
     from ai_credentials_helper.backends import codex
 
-    # Pre-populate a codex auth.json with a valid (but expired) payload,
-    # point the backend at it, and run --force --import with that same payload.
     auth_file = tmp_path / "auth.json"
     monkeypatch.setattr(codex, "AUTH_PATH", auth_file)
+    # Feed --import - parseable JSON so _do_import reaches creds.write().
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"tokens": {}}'))
 
-    payload = {
-        "tokens": {
-            "access_token": "aaa.bbb.ccc",  # invalid JWT — would normally be rejected
-            "refresh_token": "rt",
-            "account_id": "a",
-        },
-    }
+    observed = {}
+
+    def spy_write(_content):
+        observed["force_at_write"] = codex.FORCE_WRITE
+        raise codex.CredentialsError("stop here")
+
+    monkeypatch.setattr(codex, "write", spy_write)
+
     rc = cli.main(["--agent", "codex", "--force", "--import", "-"])
-
-    # Without --force this would fail; with --force the bad JWT still gets
-    # rejected by the shape check, but only that check — confirming the
-    # force flag was honored (otherwise it'd also reject the missing exp).
-    assert rc == 1  # shape check still fires
+    assert rc == 1
     err = capsys.readouterr().err
     assert "WARNING: --force" in err
-    # And the flag was actually toggled by main().
-    assert codex.FORCE_WRITE is True  # noqa: F821 — restored by restore_backend
+    # Force was active while the write path ran; spy captured it.
+    assert observed["force_at_write"] is True
 
 
 def test_no_force_means_no_warning(restore_backend, tmp_path, monkeypatch, capsys):
@@ -188,3 +195,50 @@ def test_no_force_means_no_warning(restore_backend, tmp_path, monkeypatch, capsy
     cli.main(["--agent", "codex", "--simple"])  # read-only, won't error
     err = capsys.readouterr().err
     assert "WARNING" not in err
+
+
+def test_force_is_noop_for_read_only_modes(restore_backend, tmp_path, monkeypatch, capsys):
+    """--force on a read-only command (--simple) must not flip FORCE_WRITE.
+
+    Defensive: --force is meaningless for reads, and toggling it would leave
+    the backend in a forced state if a later same-process write was supposed
+    to be safety-checked.
+    """
+    from ai_credentials_helper.backends import codex
+    auth_file = tmp_path / "auth.json"
+    monkeypatch.setattr(codex, "AUTH_PATH", auth_file)
+
+    # Pre-write a fake but parseable blob so --simple doesn't blow up.
+    auth_file.write_text(json.dumps({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig",
+            "refresh_token": "rt",
+            "account_id": "a",
+        },
+    }))
+
+    cli.main(["--agent", "codex", "--force", "--simple"])
+    err = capsys.readouterr().err
+    assert "WARNING" not in err
+    assert codex.FORCE_WRITE is False
+
+
+def test_force_reset_after_main(restore_backend, tmp_path, monkeypatch):
+    """main() must reset FORCE_WRITE in finally, even when write() raises.
+
+    Regression: prior code only reset on backend-switch, so a same-process
+    caller that hit a write error would leave the next write forced.
+    """
+    from ai_credentials_helper.backends import codex
+    auth_file = tmp_path / "auth.json"
+    monkeypatch.setattr(codex, "AUTH_PATH", auth_file)
+
+    def boom(_content):
+        raise codex.CredentialsError("simulated write failure")
+
+    monkeypatch.setattr(codex, "write", boom)
+
+    # Even though write() raises, FORCE_WRITE must end up False.
+    cli.main(["--agent", "codex", "--force", "--import", "-"])
+    assert codex.FORCE_WRITE is False
