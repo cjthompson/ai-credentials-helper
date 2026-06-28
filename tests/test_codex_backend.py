@@ -26,6 +26,35 @@ def _make_jwt(payload: dict) -> str:
     return f"{b64({'alg':'RS256','kid':'x'})}.{b64(payload)}.sig"
 
 
+def _valid_codex_payload(**overrides) -> str:
+    """Build a JSON string that passes validate_blob with a 1h-future expiry.
+
+    Pass overrides like ``access_token="..."`` or ``exp_offset=-10`` to
+    construct variants for negative tests.
+    """
+    exp = int(time.time()) + overrides.pop("exp_offset", 3600)
+    access = overrides.pop("access_token", _make_jwt({"sub": "u", "exp": exp}))
+    payload = {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": access,
+            "refresh_token": "rt_test",
+            "account_id": "acct-test",
+            **overrides,
+        },
+    }
+    return json.dumps(payload)
+
+
+@pytest.fixture
+def restore_force():
+    """Snapshot/restore codex.FORCE_WRITE so a test can't leak the flag."""
+    from ai_credentials_helper.backends import codex
+    original = codex.FORCE_WRITE
+    yield
+    codex.FORCE_WRITE = original
+
+
 @pytest.fixture
 def tmp_auth(tmp_path, monkeypatch):
     """Point ``AUTH_PATH`` at a temp file pre-populated with a codex-shaped blob."""
@@ -116,7 +145,7 @@ def test_find_account_returns_none_when_shape_invalid(tmp_auth):
 def test_write_creates_file_with_0600_perms(tmp_path, monkeypatch):
     auth_file = tmp_path / "subdir" / "auth.json"  # parent doesn't exist yet
     monkeypatch.setattr(creds, "AUTH_PATH", auth_file)
-    creds.write('{"tokens":{"access_token":"a"}}')
+    creds.write(_valid_codex_payload())
     assert auth_file.exists()
     mode = stat_mode(auth_file)
     # umask may further restrict; we only require owner write+read (no group/other bits).
@@ -125,20 +154,23 @@ def test_write_creates_file_with_0600_perms(tmp_path, monkeypatch):
 
 def test_write_replaces_existing(tmp_auth):
     auth_file, _ = tmp_auth
-    creds.write('{"new": true}')
-    assert json.loads(auth_file.read_text()) == {"new": True}
+    creds.write(_valid_codex_payload())
+    parsed = json.loads(auth_file.read_text())
+    assert parsed["tokens"]["refresh_token"] == "rt_test"
 
 
 def test_write_appends_trailing_newline_if_missing(tmp_auth):
     auth_file, _ = tmp_auth
-    creds.write('{"x": 1}')  # no trailing \n
+    # Build a payload without trailing newline to exercise the append path.
+    payload = _valid_codex_payload().rstrip("\n")
+    creds.write(payload)
     assert auth_file.read_text().endswith("\n")
 
 
 def test_write_does_not_leave_temp_files_behind(tmp_auth):
     """Atomic replace: any temp files in the parent dir get cleaned up."""
     auth_file, _ = tmp_auth
-    creds.write('{"x": 1}')
+    creds.write(_valid_codex_payload())
     leftovers = [p for p in auth_file.parent.iterdir() if p.name.startswith(".auth.json.")]
     assert leftovers == [], f"temp files leaked: {leftovers}"
 
@@ -157,7 +189,7 @@ def test_write_is_atomic_preserves_existing_on_failure(tmp_auth, monkeypatch):
 
     monkeypatch.setattr(creds.os, "replace", boom)
     with pytest.raises(creds.CredentialsError, match="Cannot write"):
-        creds.write('{"new": true}')
+        creds.write(_valid_codex_payload())
 
     assert auth_file.read_text() == original_content
 
@@ -198,6 +230,91 @@ def test_extract_oauth_tokens_falls_back_when_jwt_invalid(tmp_auth):
 def test_refresh_tokens_raises_with_clear_message():
     with pytest.raises(creds.CredentialsError, match="not supported for codex"):
         creds.refresh_tokens("rt_anything")
+
+
+# ── Write-time validation (safety net against garbage overwrites) ──────────
+
+
+@pytest.mark.parametrize("garbage", ["", "[]", '"a string"', "null", "{", "not json"])
+def test_write_rejects_non_json_or_non_object_payload(garbage, tmp_auth, restore_force):
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError):
+        creds.write(garbage)
+    assert auth_file.read_text() == original, "failed validation must not touch disk"
+
+
+def test_write_rejects_missing_tokens(tmp_auth, restore_force):
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="tokens"):
+        creds.write(json.dumps({"auth_mode": "chatgpt"}))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_non_jwt_access_token(tmp_auth, restore_force):
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="JWT"):
+        creds.write(_valid_codex_payload(access_token="not.a.jwt"))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_empty_refresh_token(tmp_auth, restore_force):
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="refresh_token"):
+        creds.write(_valid_codex_payload(refresh_token=""))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_expired_token(tmp_auth, restore_force):
+    """The headline protection: an expired access_token must be refused."""
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError, match="expired"):
+        creds.write(_valid_codex_payload(exp_offset=-3600))
+    assert auth_file.read_text() == original
+
+
+def test_write_rejects_unparseable_jwt(tmp_auth, restore_force):
+    """A non-decodable JWT must be rejected — we'd rather refuse than write
+    something whose expiry we can't verify."""
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    # Three segments but the payload segment is not valid base64-encoded JSON.
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.write(_valid_codex_payload(access_token="aaa.!!!.bbb"))
+    assert auth_file.read_text() == original
+
+
+def test_force_bypasses_expiry_check(tmp_auth, restore_force):
+    """--force accepts expired tokens; tests/recovery use case."""
+    creds.FORCE_WRITE = True
+    auth_file, _ = tmp_auth
+    creds.write(_valid_codex_payload(exp_offset=-3600))
+    parsed = json.loads(auth_file.read_text())
+    assert parsed["tokens"]["refresh_token"] == "rt_test"
+
+
+def test_force_still_enforces_shape(tmp_auth, restore_force):
+    """Shape checks run regardless of --force — '[]' must never reach disk."""
+    creds.FORCE_WRITE = True
+    auth_file, _ = tmp_auth
+    original = auth_file.read_text()
+    with pytest.raises(creds.CredentialsError):
+        creds.write("[]")
+    assert auth_file.read_text() == original
+
+
+def test_set_backend_resets_force_write():
+    """A stale FORCE_WRITE from a prior invocation must not leak forward."""
+    from ai_credentials_helper import credentials as creds_facade
+    creds_facade.set_backend("codex")
+    creds.FORCE_WRITE = True
+    creds_facade.set_backend("claude")
+    creds_facade.set_backend("codex")
+    assert creds.FORCE_WRITE is False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

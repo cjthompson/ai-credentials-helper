@@ -27,9 +27,16 @@ def set_backend(name: str) -> None:
     Subsequent module-level calls (``read_raw``, ``write``, ``refresh_tokens``,
     etc.) dispatch to the chosen backend. Raises ``ValueError`` if ``name`` is
     not a registered backend.
+
+    Always resets backend-specific flags (e.g. ``codex.FORCE_WRITE``) so a
+    prior ``--force`` invocation can't leak into a fresh one.
     """
     global _backend
     _backend = get_backend(name)
+    # Reset any backend-level flags that affect write semantics. New backends
+    # should reset their own here too (or live on the facade as constants).
+    if hasattr(_backend, "FORCE_WRITE"):
+        _backend.FORCE_WRITE = False
 
 
 def backend_name() -> str:

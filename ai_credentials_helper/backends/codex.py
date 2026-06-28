@@ -29,6 +29,7 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from ai_credentials_helper.backends.claude import CredentialsError as ClaudeCredentialsError
@@ -40,6 +41,13 @@ AUTH_PATH = Path.home() / ".codex" / "auth.json"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID: str | None = None  # codex uses PKCE; refresh not implemented in v1
 KEYCHAIN_SERVICE = None  # codex doesn't use macOS Keychain; exposes for facade parity
+
+# When True, codex.write() skips the expiry check in validate_blob() (shape
+# checks still run, so a totally-garbage payload is still rejected). The CLI
+# sets this when --force is passed; users shouldn't toggle it directly.
+# Reset by ai_credentials_helper.credentials.set_backend() on every backend
+# switch so a stale flag can't leak across invocations.
+FORCE_WRITE = False
 
 
 class CredentialsError(ClaudeCredentialsError):
@@ -102,14 +110,72 @@ def find_account() -> str | None:
     return (data.get("tokens") or {}).get("account_id")
 
 
+def validate_blob(data) -> None:
+    """Reject codex payloads that would clobber a real auth file with garbage.
+
+    Defense-in-depth: ``write()`` (called by ``--import`` and ``--receive``)
+    must not silently overwrite ``~/.codex/auth.json`` with a wrong-shaped or
+    already-expired payload. A failed check raises :class:`CredentialsError`
+    before the atomic-replace step, so the existing file stays put.
+
+    With ``FORCE_WRITE`` set, the expiry check is skipped — useful for tests
+    and for restoring a deliberately-saved near-expiry token. Shape checks
+    still run, so a totally-garbage payload (non-dict, no ``tokens`` key,
+    empty access_token, etc.) is rejected regardless of force.
+    """
+    if not isinstance(data, dict):
+        raise CredentialsError(f"top-level value must be a JSON object, got {type(data).__name__}")
+
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        raise CredentialsError("missing or non-dict 'tokens' object")
+
+    access = tokens.get("access_token")
+    if not isinstance(access, str) or not access:
+        raise CredentialsError("tokens.access_token must be a non-empty string")
+    if access.count(".") != 2:
+        raise CredentialsError(
+            "tokens.access_token is not a JWT (expected exactly two '.' separators)"
+        )
+
+    refresh = tokens.get("refresh_token")
+    if not isinstance(refresh, str) or not refresh:
+        raise CredentialsError("tokens.refresh_token must be a non-empty string")
+
+    if not FORCE_WRITE:
+        exp = _decode_jwt_exp(access)
+        if exp is None:
+            raise CredentialsError(
+                "tokens.access_token JWT 'exp' claim could not be decoded; "
+                "refusing to write a token we can't verify"
+            )
+        if exp <= int(time.time()):
+            expiry_local = datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S %Z")
+            raise CredentialsError(
+                f"tokens.access_token expired at {expiry_local}; "
+                "use --force to write an expired token anyway"
+            )
+
+
 def write(content: str) -> None:
     """Write ``content`` verbatim to ``~/.codex/auth.json`` with ``0600`` perms.
+
+    Before touching the filesystem, parse and validate the payload: it must
+    be valid JSON shaped like codex's auth file, with a non-empty access_token
+    (JWT-shaped), non-empty refresh_token, and an unexpired ``exp`` claim
+    unless ``FORCE_WRITE`` is set. A failed validation raises
+    :class:`CredentialsError` and leaves the existing file untouched.
 
     Creates ``~/.codex/`` if missing. Writes to a temp file in the same
     directory (so the rename is atomic — cross-filesystem renames aren't),
     then ``os.replace``s it into place. A crash mid-write leaves the original
     auth.json untouched instead of producing a truncated file.
     """
+    try:
+        data = parse_blob(content)
+    except ValueError as e:
+        raise CredentialsError(f"payload is not valid JSON: {e}") from e
+    validate_blob(data)
     AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         # NamedTemporaryFile would default to /tmp (different filesystem, so
@@ -145,7 +211,10 @@ def _decode_jwt_exp(jwt: str) -> int | None:
     """
     if not jwt or jwt.count(".") != 2:
         return None
-    payload_b64 = jwt.split(".", 1)[1]
+    # Take only the middle (payload) segment — splitting on "." once includes
+    # everything after the first dot, which is "payload.sig" and breaks the
+    # base64 decode below.
+    payload_b64 = jwt.split(".")[1]
     # JWTs use URL-safe base64 without padding.
     payload_b64 += "=" * (-len(payload_b64) % 4)
     try:

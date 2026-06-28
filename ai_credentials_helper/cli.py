@@ -123,6 +123,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="claude",
         help="which agent's credentials to operate on (default: claude)",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="skip backend safety checks on writes (e.g. JWT expiry). Shape "
+             "checks still run. Use with care.",
+    )
     p.add_argument("--raw", action="store_true", help="print the raw stored blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
     p.add_argument("--refresh", action="store_true", help="refresh the access token")
@@ -348,6 +354,14 @@ def main(argv: list[str] | None = None) -> int:
     # Activate the chosen backend before any backend call. Unknown names
     # raise ValueError; argparse already restricts to the choices set.
     creds.set_backend(args.agent)
+
+    # --force bypasses backend write-time safety checks (e.g. JWT expiry).
+    # Must be set AFTER set_backend (which resets FORCE_WRITE) and BEFORE
+    # any write path. Always warn — bypassing safety should be loud.
+    if args.force:
+        if getattr(creds._backend, "FORCE_WRITE", None) is False:
+            creds._backend.FORCE_WRITE = True
+        _err("WARNING: --force set; skipping backend write-time safety checks")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,

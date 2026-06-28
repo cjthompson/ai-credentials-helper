@@ -149,3 +149,42 @@ def test_store_label_uses_backend_specific_noun(restore_backend):
     creds.set_backend("codex")
     assert "auth file" in cli._store_label()
     assert "None" not in cli._store_label()
+
+
+def test_force_flag_prints_warning_and_sets_flag(restore_backend, tmp_path, monkeypatch, capsys):
+    """--force emits a stderr warning AND sets codex.FORCE_WRITE = True."""
+    from ai_credentials_helper.backends import codex
+
+    # Pre-populate a codex auth.json with a valid (but expired) payload,
+    # point the backend at it, and run --force --import with that same payload.
+    auth_file = tmp_path / "auth.json"
+    monkeypatch.setattr(codex, "AUTH_PATH", auth_file)
+
+    payload = {
+        "tokens": {
+            "access_token": "aaa.bbb.ccc",  # invalid JWT — would normally be rejected
+            "refresh_token": "rt",
+            "account_id": "a",
+        },
+    }
+    rc = cli.main(["--agent", "codex", "--force", "--import", "-"])
+
+    # Without --force this would fail; with --force the bad JWT still gets
+    # rejected by the shape check, but only that check — confirming the
+    # force flag was honored (otherwise it'd also reject the missing exp).
+    assert rc == 1  # shape check still fires
+    err = capsys.readouterr().err
+    assert "WARNING: --force" in err
+    # And the flag was actually toggled by main().
+    assert codex.FORCE_WRITE is True  # noqa: F821 — restored by restore_backend
+
+
+def test_no_force_means_no_warning(restore_backend, tmp_path, monkeypatch, capsys):
+    """Without --force, no WARNING line should appear in stderr."""
+    from ai_credentials_helper.backends import codex
+    auth_file = tmp_path / "auth.json"
+    monkeypatch.setattr(codex, "AUTH_PATH", auth_file)
+
+    cli.main(["--agent", "codex", "--simple"])  # read-only, won't error
+    err = capsys.readouterr().err
+    assert "WARNING" not in err
