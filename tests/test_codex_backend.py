@@ -135,6 +135,33 @@ def test_write_appends_trailing_newline_if_missing(tmp_auth):
     assert auth_file.read_text().endswith("\n")
 
 
+def test_write_does_not_leave_temp_files_behind(tmp_auth):
+    """Atomic replace: any temp files in the parent dir get cleaned up."""
+    auth_file, _ = tmp_auth
+    creds.write('{"x": 1}')
+    leftovers = [p for p in auth_file.parent.iterdir() if p.name.startswith(".auth.json.")]
+    assert leftovers == [], f"temp files leaked: {leftovers}"
+
+
+def test_write_is_atomic_preserves_existing_on_failure(tmp_auth, monkeypatch):
+    """If os.replace fails mid-write, the original auth.json is untouched.
+
+    Regression: the prior implementation opened auth.json with O_TRUNC, so a
+    crash mid-write left an empty/partial file and clobbered the original.
+    """
+    auth_file, _ = tmp_auth
+    original_content = auth_file.read_text()
+
+    def boom(*_a, **_kw):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(creds.os, "replace", boom)
+    with pytest.raises(creds.CredentialsError, match="Cannot write"):
+        creds.write('{"new": true}')
+
+    assert auth_file.read_text() == original_content
+
+
 # ── Token extraction ───────────────────────────────────────────────────────
 
 

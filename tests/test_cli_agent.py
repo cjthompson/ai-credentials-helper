@@ -137,3 +137,15 @@ def test_parse_blob_dispatches_for_both_backends(restore_backend):
     creds.set_backend("codex")
     codex_sample = '{"tokens":{"access_token":"a","refresh_token":"r","account_id":"x"}}'
     assert creds.parse_blob(codex_sample)["tokens"]["account_id"] == "x"
+
+
+def test_store_label_uses_backend_specific_noun(restore_backend):
+    """Regression: --import/--receive used to print 'None' for codex because
+    the messages referenced creds.KEYCHAIN_SERVICE, which codex doesn't have."""
+    creds.set_backend("claude")
+    assert "keychain service" in cli._store_label()
+    assert "'Claude Code-credentials'" in cli._store_label()
+
+    creds.set_backend("codex")
+    assert "auth file" in cli._store_label()
+    assert "None" not in cli._store_label()

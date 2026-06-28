@@ -71,6 +71,21 @@ def _err(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _store_label() -> str:
+    """Human-readable description of the active backend's storage, for messages.
+
+    Claude prints ``keychain service 'X'``; codex prints ``auth file 'X'`` —
+    the noun matches the actual backend so users see something that maps to
+    their filesystem (rather than ``None`` for codex, which has no keychain
+    service at all).
+    """
+    if creds.KEYCHAIN_SERVICE:
+        return f"keychain service {creds.KEYCHAIN_SERVICE!r}"
+    # codex (and any future file-backed backend): show the file path.
+    auth_path = getattr(creds._backend, "AUTH_PATH", None)
+    return f"auth file {str(auth_path)!r}" if auth_path else "active store"
+
+
 def _get_passphrase() -> str:
     """Return the transfer passphrase from the env, else prompt; never from argv.
 
@@ -194,7 +209,7 @@ def _do_import(import_path: str) -> int:
         _err("Error: Import input is empty")
         return 1
     creds.write(content)
-    _err(f"Imported {len(content.encode())} bytes to keychain service '{creds.KEYCHAIN_SERVICE}'")
+    _err(f"Imported {len(content.encode())} bytes to {_store_label()}")
     return 0
 
 
@@ -289,7 +304,7 @@ def _do_receive(port: int, verbose: bool = False) -> int:
         _err("Error: decrypted payload is not a valid credential blob; keychain left unchanged")
         return 1
     creds.write(content)
-    _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")
+    _err(f"Received and imported {len(content.encode())} bytes to {_store_label()}")
     if verbose:
         blob = creds.parse_blob(content)
         oauth = blob.get("claudeAiOauth", {})

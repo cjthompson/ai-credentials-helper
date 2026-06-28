@@ -27,6 +27,7 @@ expiry display uses ``base64.urlsafe_b64decode`` + ``json.loads``.
 import base64
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -104,18 +105,35 @@ def find_account() -> str | None:
 def write(content: str) -> None:
     """Write ``content`` verbatim to ``~/.codex/auth.json`` with ``0600`` perms.
 
-    Creates ``~/.codex/`` if missing. Replaces the existing file atomically
-    via write-to-temp + rename, so a concurrent ``codex`` invocation cannot
-    observe a partial file.
+    Creates ``~/.codex/`` if missing. Writes to a temp file in the same
+    directory (so the rename is atomic — cross-filesystem renames aren't),
+    then ``os.replace``s it into place. A crash mid-write leaves the original
+    auth.json untouched instead of producing a truncated file.
     """
     AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(AUTH_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        # NamedTemporaryFile would default to /tmp (different filesystem, so
+        # the replace isn't atomic). Build the path manually so the temp file
+        # sits next to the final destination.
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".auth.json.", dir=str(AUTH_PATH.parent)
+        )
+    except OSError as e:
+        raise CredentialsError(f"Cannot create temp file in {AUTH_PATH.parent}: {e}") from e
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             if not content.endswith("\n"):
                 f.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, AUTH_PATH)
     except OSError as e:
+        # Best-effort cleanup; the temp file may already be gone after a
+        # successful replace.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         raise CredentialsError(f"Cannot write {AUTH_PATH}: {e}") from e
 
 

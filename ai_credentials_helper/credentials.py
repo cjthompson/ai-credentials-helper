@@ -45,7 +45,7 @@ def backend_label() -> str:
 # Dynamic dispatch — every name in __all__ resolves to the active backend.
 # The implementation is per-call so callers don't need to remember which
 # backend is active; the facade handles it transparently.
-__all__ = [
+__all__ = [  # noqa: F822 - names dispatched dynamically via __getattr__
     "CredentialsError",
     "KEYCHAIN_SERVICE",
     "TOKEN_URL",
