@@ -26,6 +26,7 @@ expiry display uses ``base64.urlsafe_b64decode`` + ``json.loads``.
 
 import base64
 import json
+import math
 import os
 import tempfile
 import time
@@ -107,7 +108,12 @@ def find_account() -> str | None:
         data = read_json()
     except (CredentialsError, ValueError, json.JSONDecodeError):
         return None
-    return (data.get("tokens") or {}).get("account_id")
+    if not isinstance(data, dict):
+        return None
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    return tokens.get("account_id")
 
 
 def validate_blob(data) -> None:
@@ -150,7 +156,12 @@ def validate_blob(data) -> None:
                 "refusing to write a token we can't verify"
             )
         if exp <= int(time.time()):
-            expiry_local = datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S %Z")
+            try:
+                expiry_local = datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S %Z")
+            except (OverflowError, OSError, TypeError, ValueError):
+                raise CredentialsError(
+                    "tokens.access_token JWT 'exp' claim is outside the supported timestamp range"
+                ) from None
             raise CredentialsError(
                 f"tokens.access_token expired at {expiry_local}; "
                 "use --force to write an expired token anyway"
@@ -203,7 +214,7 @@ def write(content: str) -> None:
         raise CredentialsError(f"Cannot write {AUTH_PATH}: {e}") from e
 
 
-def _decode_jwt_exp(jwt: str) -> int | None:
+def _decode_jwt_exp(jwt: str) -> int | float | None:
     """Return the JWT's ``exp`` claim (seconds since epoch) with no signature check.
 
     Codex tokens are signed JWTs; we only use the ``exp`` field for display,
@@ -237,14 +248,27 @@ def _decode_jwt_exp(jwt: str) -> int | None:
     # with a useful message rather than TypeError further up.
     if isinstance(exp, bool) or not isinstance(exp, (int, float)):
         return None
+    try:
+        if not math.isfinite(exp):
+            return None
+        # Expiry is displayed as a local datetime elsewhere. Reject numeric
+        # values the platform cannot represent instead of accepting a claim
+        # that will later explode during error reporting or verbose output.
+        datetime.fromtimestamp(exp)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
     return exp
 
 
-def tokens_from_data(data: dict) -> tuple[str, str, float] | None:
+def tokens_from_data(data: object) -> tuple[str, str, float] | None:
     """Extract ``(access_token, refresh_token, expires_at_epoch)`` from a parsed blob."""
-    tokens = data.get("tokens") or {}
+    if not isinstance(data, dict):
+        return None
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
     access = tokens.get("access_token")
-    if not access:
+    if not isinstance(access, str) or not access:
         return None
     expires_at = _decode_jwt_exp(access)
     if expires_at is None:

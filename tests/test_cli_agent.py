@@ -7,11 +7,51 @@ default is claude (back-compat), that unknown agents error cleanly, and that
 
 import json
 import sys
+import time
 
 import pytest
 
 from ai_credentials_helper import cli
 from ai_credentials_helper import credentials as creds
+
+
+class _FakeConnection:
+    def __init__(self, payload=b"encrypted-frame"):
+        self._blocks = iter((payload, b""))
+
+    def settimeout(self, _timeout):
+        pass
+
+    def recv(self, _size):
+        return next(self._blocks)
+
+    def close(self):
+        pass
+
+
+class _FakeServer:
+    def __init__(self, payload=b"encrypted-frame"):
+        self.connection = _FakeConnection(payload)
+
+    def setsockopt(self, *_args):
+        pass
+
+    def bind(self, _address):
+        pass
+
+    def listen(self, _backlog):
+        pass
+
+    def accept(self):
+        return self.connection, ("127.0.0.1", 12345)
+
+    def close(self):
+        pass
+
+
+def _fake_receive_socket(monkeypatch):
+    monkeypatch.setattr(cli, "_get_passphrase", lambda: "test-passphrase")
+    monkeypatch.setattr(cli.socket, "socket", lambda *_args: _FakeServer())
 
 
 @pytest.fixture
@@ -73,6 +113,15 @@ def test_cli_default_agent_is_claude():
     parser = cli._build_parser()
     args = parser.parse_args(["--raw"])
     assert args.agent == "claude"
+
+
+def test_cli_help_describes_backend_aware_storage_and_oauth_subset():
+    help_text = cli._build_parser().format_help()
+    normalized_help = " ".join(help_text.split())
+    assert "Manage OAuth credentials for supported AI agents." in normalized_help
+    assert "active store is left unchanged" in normalized_help
+    assert "portable token subset for the selected backend" in normalized_help
+    assert "only the claudeAiOauth section" not in normalized_help
 
 
 def test_cli_rejects_unknown_agent():
@@ -152,6 +201,82 @@ def test_store_label_uses_backend_specific_noun(restore_backend):
     assert "None" not in cli._store_label()
 
 
+def test_receive_decryption_failure_names_active_store(
+    restore_backend, monkeypatch, capsys
+):
+    _fake_receive_socket(monkeypatch)
+    creds.set_backend("codex")
+
+    def fail_decrypt(_frame, _passphrase):
+        raise cli.transfer_crypto.DecryptionError("authentication failed")
+
+    monkeypatch.setattr(cli.transfer_crypto, "decrypt", fail_decrypt)
+
+    assert cli._do_receive(0) == 1
+    assert f"{cli._store_label()} left unchanged" in capsys.readouterr().err
+
+
+def test_receive_invalid_blob_names_active_store(restore_backend, monkeypatch, capsys):
+    _fake_receive_socket(monkeypatch)
+    creds.set_backend("codex")
+    monkeypatch.setattr(cli.transfer_crypto, "decrypt", lambda *_args: "not json")
+
+    assert cli._do_receive(0) == 1
+    assert f"{cli._store_label()} left unchanged" in capsys.readouterr().err
+
+
+def test_verbose_receive_prints_codex_access_token_and_expiry(
+    restore_backend, tmp_path, monkeypatch, capsys
+):
+    import base64
+
+    from ai_credentials_helper.backends import codex
+
+    def b64(data):
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
+
+    exp = int(time.time()) + 3600
+    access = f"{b64({'alg': 'RS256'})}.{b64({'exp': exp})}.sig"
+    content = json.dumps(
+        {"tokens": {"access_token": access, "refresh_token": "rt", "account_id": "acct"}}
+    )
+    monkeypatch.setattr(codex, "AUTH_PATH", tmp_path / "auth.json")
+    _fake_receive_socket(monkeypatch)
+    monkeypatch.setattr(cli.transfer_crypto, "decrypt", lambda *_args: content)
+    creds.set_backend("codex")
+
+    assert cli._do_receive(0, verbose=True) == 0
+    err = capsys.readouterr().err
+    assert f"access_token:  {access}" in err
+    assert "expires:" in err
+
+
+def test_verbose_receive_keeps_claude_token_presentation(
+    restore_backend, monkeypatch, capsys
+):
+    from ai_credentials_helper.backends import claude
+
+    exp = int(time.time()) + 3600
+    content = json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": "claude-access",
+                "refreshToken": "claude-refresh",
+                "expiresAt": exp * 1000,
+            }
+        }
+    )
+    _fake_receive_socket(monkeypatch)
+    monkeypatch.setattr(cli.transfer_crypto, "decrypt", lambda *_args: content)
+    monkeypatch.setattr(claude, "write", lambda _content: None)
+    creds.set_backend("claude")
+
+    assert cli._do_receive(0, verbose=True) == 0
+    err = capsys.readouterr().err
+    assert "access_token:  claude-access" in err
+    assert "expires:" in err
+
+
 def test_force_flag_prints_warning_and_sets_flag(restore_backend, tmp_path, monkeypatch, capsys):
     """--force emits a stderr warning AND toggles codex.FORCE_WRITE during the call.
 
@@ -221,6 +346,84 @@ def test_force_is_noop_for_read_only_modes(restore_backend, tmp_path, monkeypatc
     cli.main(["--agent", "codex", "--force", "--simple"])
     err = capsys.readouterr().err
     assert "WARNING" not in err
+    assert codex.FORCE_WRITE is False
+
+
+def test_force_is_noop_for_codex_send(restore_backend, monkeypatch, capsys):
+    from ai_credentials_helper.backends import codex
+
+    observed = {}
+
+    def spy_send(_host, _port, _oauth_only):
+        observed["force_during_send"] = codex.FORCE_WRITE
+        return 0
+
+    monkeypatch.setattr(cli, "_do_send", spy_send)
+
+    assert cli.main(["--agent", "codex", "--force", "--send", "example.test"]) == 0
+    assert observed["force_during_send"] is False
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_force_is_noop_for_codex_refresh(restore_backend, monkeypatch, capsys):
+    from ai_credentials_helper.backends import codex
+
+    observed = {}
+    monkeypatch.setattr(codex, "extract_oauth_tokens", lambda: ("access", "refresh", 1.0))
+
+    def spy_refresh(_tokens):
+        observed["force_during_refresh"] = codex.FORCE_WRITE
+        return 0
+
+    monkeypatch.setattr(cli, "_do_refresh", spy_refresh)
+
+    assert cli.main(["--agent", "codex", "--force", "--refresh"]) == 0
+    assert observed["force_during_refresh"] is False
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_force_is_noop_for_claude_import(
+    restore_backend, monkeypatch, capsys
+):
+    import io
+
+    from ai_credentials_helper.backends import claude
+
+    observed = {}
+    monkeypatch.delattr(claude, "FORCE_WRITE", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"claudeAiOauth": {}}'))
+
+    def spy_write(_content):
+        observed["force_during_write"] = getattr(claude, "FORCE_WRITE", False)
+
+    monkeypatch.setattr(claude, "write", spy_write)
+
+    try:
+        assert cli.main(["--agent", "claude", "--force", "--import", "-"]) == 0
+        assert observed["force_during_write"] is False
+        assert "WARNING" not in capsys.readouterr().err
+    finally:
+        if hasattr(claude, "FORCE_WRITE"):
+            del claude.FORCE_WRITE
+
+
+def test_force_activates_for_codex_receive_and_resets(
+    restore_backend, monkeypatch, capsys
+):
+    from ai_credentials_helper.backends import codex
+
+    observed = {}
+
+    def spy_receive(_port, verbose=False):
+        observed["force_during_receive"] = codex.FORCE_WRITE
+        observed["verbose"] = verbose
+        return 0
+
+    monkeypatch.setattr(cli, "_do_receive", spy_receive)
+
+    assert cli.main(["--agent", "codex", "--force", "--receive"]) == 0
+    assert observed == {"force_during_receive": True, "verbose": False}
+    assert "WARNING: --force" in capsys.readouterr().err
     assert codex.FORCE_WRITE is False
 
 

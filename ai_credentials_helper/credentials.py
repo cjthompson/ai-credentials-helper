@@ -64,6 +64,7 @@ __all__ = [  # noqa: F822 - names dispatched dynamically via __getattr__
     "read_json",
     "write",
     "find_account",
+    "tokens_from_data",
     "extract_oauth_tokens",
     "refresh_tokens",
     "oauth_only_json",

@@ -1,8 +1,8 @@
-"""CLI for managing Claude Code OAuth credentials in the macOS Keychain.
+"""CLI for managing OAuth credentials for supported AI agents.
 
 Installed as the ``credentials-helper`` console script (and runnable via
 ``python -m ai_credentials_helper.cli``). A pure-Python counterpart to
-``credentials-helper.sh`` — same CLI surface, no bash/jq/xxd/curl. All keychain
+``credentials-helper.sh`` — same CLI surface, no bash/jq/xxd/curl. All storage
 and OAuth work is delegated to the shared ``ai_credentials_helper.credentials`` module.
 
 Modes (mutually exclusive, except --oauth-only which may accompany --send).
@@ -107,12 +107,12 @@ def _get_passphrase() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="credentials-helper",
-        description="Manage Claude Code OAuth credentials in the macOS Keychain.",
+        description="Manage OAuth credentials for supported AI agents.",
         epilog=(
             "--send/--receive are end-to-end encrypted (AES-256-CBC + HMAC-SHA256) "
             "with a shared passphrase. Set CLAUDE_CREDENTIALS_PASSPHRASE on both "
             "ends, or you will be prompted. A wrong passphrase or tampered payload "
-            "is rejected and the keychain is left untouched."
+            "is rejected and the active store is left unchanged."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -136,7 +136,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--oauth-only",
         dest="oauth_only",
         action="store_true",
-        help="only the claudeAiOauth section (alone, or as a --send modifier)",
+        help="only the portable token subset for the selected backend "
+        "(alone, or as a --send modifier)",
     )
     p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
     p.add_argument(
@@ -291,34 +292,36 @@ def _do_receive(port: int, verbose: bool = False) -> int:
     if not frame.strip():
         _err("Error: Received empty connection")
         return 1
-    # Verify+decrypt BEFORE touching the keychain: a wrong passphrase or a
+    # Verify+decrypt BEFORE touching the active store: a wrong passphrase or a
     # forged/tampered payload is rejected here, leaving credentials untouched.
     try:
         content = transfer_crypto.decrypt(frame, passphrase).strip()
     except transfer_crypto.DecryptionError as e:
         log.debug("receive: decryption/verification failed (%s)", e)
-        _err(f"Error: {e}; keychain left unchanged")
+        _err(f"Error: {e}; {_store_label()} left unchanged")
         return 1
     log.debug("receive: verified + decrypted %d bytes", len(content.encode()))
     # The blob must be a credential document — raw JSON or hex-encoded JSON, the
     # two forms Claude Code stores (see creds.read_raw / a full --send). Reject
-    # anything else before overwriting the keychain; an authentic HMAC alone
+    # anything else before overwriting the active store; an authentic HMAC alone
     # doesn't make a payload a valid blob, and writing garbage would corrupt it.
     try:
         creds.parse_blob(content)
     except ValueError:
-        _err("Error: decrypted payload is not a valid credential blob; keychain left unchanged")
+        _err(
+            "Error: decrypted payload is not a valid credential blob; "
+            f"{_store_label()} left unchanged"
+        )
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to {_store_label()}")
     if verbose:
         blob = creds.parse_blob(content)
-        oauth = blob.get("claudeAiOauth", {})
-        access_token = oauth.get("accessToken", "")
-        expires_ms = oauth.get("expiresAt", 0)
-        if access_token and expires_ms:
+        tokens = creds.tokens_from_data(blob)
+        if tokens:
+            access_token, _refresh_token, expires_epoch = tokens
             _err(f"access_token:  {access_token}")
-            _err(f"expires:       {_format_expiry_verbose(expires_ms / 1000)}")
+            _err(f"expires:       {_format_expiry_verbose(expires_epoch)}")
     return 0
 
 
@@ -360,12 +363,12 @@ def main(argv: list[str] | None = None) -> int:
         _err(error)
         return 1
 
-    # --force only applies to write modes (import/send/receive/refresh) and
-    # only after args validate cleanly. Always warn — bypassing safety should
-    # be loud. Reset FORCE_WRITE in finally so a same-process caller (e.g.
-    # tests, programmatic use) never leaks a forced state forward.
-    is_write = bool(args.import_path or args.send_host or args.receive or args.refresh)
-    if args.force and is_write:
+    # --force only bypasses Codex validation on modes that write the local auth
+    # file. Send and refresh cannot run that validation, and Claude has no
+    # FORCE_WRITE behavior. Reset in finally so same-process callers never
+    # leak a forced state forward.
+    force_codex_write = args.agent == "codex" and bool(args.import_path or args.receive)
+    if args.force and force_codex_write:
         creds._backend.FORCE_WRITE = True
         _err("WARNING: --force set; skipping backend write-time safety checks")
 

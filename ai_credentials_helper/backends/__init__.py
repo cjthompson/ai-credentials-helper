@@ -39,6 +39,10 @@ class Backend(Protocol):
         """Return an account-like identifier (keychain acct, account_id, ...) or None."""
         ...
 
+    def tokens_from_data(self, data: dict) -> tuple[str, str, float] | None:
+        """Extract ``(access_token, refresh_token, expires_at_epoch)`` from parsed data."""
+        ...
+
     def extract_oauth_tokens(self) -> tuple[str, str, float] | None:
         """Return ``(access_token, refresh_token, expires_at_epoch)`` or None."""
         ...

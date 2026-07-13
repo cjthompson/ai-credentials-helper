@@ -15,12 +15,12 @@ import pytest
 from ai_credentials_helper.backends import codex as creds
 
 
-def _make_jwt(payload: dict) -> str:
+def _make_jwt(payload: object) -> str:
     """Build a structurally valid JWT (header.payload.sig) with payload only.
 
     The signature segment is junk — we only test parsing, not verification.
     """
-    def b64(d: dict) -> str:
+    def b64(d: object) -> str:
         return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
 
     return f"{b64({'alg':'RS256','kid':'x'})}.{b64(payload)}.sig"
@@ -139,6 +139,16 @@ def test_find_account_returns_none_when_shape_invalid(tmp_auth):
     assert creds.find_account() is None
 
 
+@pytest.mark.parametrize(
+    "data",
+    [[], "credentials", 42, None, {"tokens": []}, {"tokens": "credentials"}],
+)
+def test_find_account_returns_none_for_non_object_containers(tmp_auth, data):
+    auth_file, _ = tmp_auth
+    auth_file.write_text(json.dumps(data))
+    assert creds.find_account() is None
+
+
 # ── Write paths ────────────────────────────────────────────────────────────
 
 
@@ -222,6 +232,33 @@ def test_extract_oauth_tokens_falls_back_when_jwt_invalid(tmp_auth):
     assert refresh == "rt_abc123"
     # Falls back to now+3600 when JWT decode fails.
     assert expires_at > time.time()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[], "credentials", 42, None, {"tokens": []}, {"tokens": "credentials"}],
+)
+def test_tokens_from_data_returns_none_for_non_object_containers(data):
+    assert creds.tokens_from_data(data) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[], "credentials", 42, None, {"tokens": []}, {"tokens": "credentials"}],
+)
+def test_extract_oauth_tokens_returns_none_for_non_object_containers(tmp_auth, data):
+    auth_file, _ = tmp_auth
+    auth_file.write_text(json.dumps(data))
+    assert creds.extract_oauth_tokens() is None
+
+
+def test_non_string_access_token_returns_none_instead_of_raising(tmp_auth):
+    data = {"tokens": {"access_token": 123, "refresh_token": "refresh"}}
+    assert creds.tokens_from_data(data) is None
+
+    auth_file, _ = tmp_auth
+    auth_file.write_text(json.dumps(data))
+    assert creds.extract_oauth_tokens() is None
 
 
 # ── Refresh (not implemented for codex in v1) ─────────────────────────────
@@ -334,6 +371,21 @@ def test_write_rejects_non_object_jwt_payload(tmp_auth, restore_force):
     assert auth_file.read_text() == original
 
 
+@pytest.mark.parametrize(
+    "exp",
+    [True, "1782635025", None, float("nan"), float("inf"), float("-inf"), 1e100, -1e100],
+)
+def test_decode_jwt_exp_rejects_unusable_values(exp):
+    assert creds._decode_jwt_exp(_make_jwt({"exp": exp})) is None
+
+
+@pytest.mark.parametrize("exp", [1e100, -1e100])
+def test_validate_blob_rejects_out_of_range_exp_cleanly(exp, restore_force):
+    data = json.loads(_valid_codex_payload(access_token=_make_jwt({"exp": exp})))
+    with pytest.raises(creds.CredentialsError, match="exp"):
+        creds.validate_blob(data)
+
+
 def test_force_bypasses_expiry_check(tmp_auth, restore_force):
     """--force accepts expired tokens; tests/recovery use case."""
     creds.FORCE_WRITE = True
@@ -356,11 +408,16 @@ def test_force_still_enforces_shape(tmp_auth, restore_force):
 def test_set_backend_resets_force_write():
     """A stale FORCE_WRITE from a prior invocation must not leak forward."""
     from ai_credentials_helper import credentials as creds_facade
-    creds_facade.set_backend("codex")
-    creds.FORCE_WRITE = True
-    creds_facade.set_backend("claude")
-    creds_facade.set_backend("codex")
-    assert creds.FORCE_WRITE is False
+    original_backend = creds_facade._backend
+    try:
+        creds_facade.set_backend("codex")
+        creds.FORCE_WRITE = True
+        creds_facade.set_backend("claude")
+        creds_facade.set_backend("codex")
+        assert creds.FORCE_WRITE is False
+    finally:
+        creds_facade._backend = original_backend
+        creds.FORCE_WRITE = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
