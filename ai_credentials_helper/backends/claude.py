@@ -103,6 +103,29 @@ def validate_blob(data: object) -> None:
             raise CredentialsError(f"claudeAiOauth.{field} must be a non-empty string")
 
 
+def validate_blob(data) -> None:
+    """Reject parsed payloads that aren't Claude Code credentials.
+
+    Called by ``--receive`` before the keychain entry is replaced. Parsing as
+    JSON is not enough: another agent's blob (a codex ``auth.json``, say)
+    parses fine but would leave the user with a keychain entry Claude Code
+    cannot authenticate with, and the only symptom is that Claude Code stops
+    working. Raises :class:`CredentialsError` before :func:`write` is reached,
+    so the existing entry stays put.
+
+    The codex backend has always had an equivalent check (called from its own
+    ``write``); this closes the same gap on the claude side.
+    """
+    if not isinstance(data, dict):
+        raise CredentialsError(f"top-level value must be a JSON object, got {type(data).__name__}")
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        raise CredentialsError("missing or non-dict 'claudeAiOauth' object")
+    access = oauth.get("accessToken")
+    if not isinstance(access, str) or not access:
+        raise CredentialsError("claudeAiOauth.accessToken must be a non-empty string")
+
+
 def read_json() -> dict:
     """Read and parse the credential blob, accepting plain or hex JSON."""
     return parse_blob(read_raw())

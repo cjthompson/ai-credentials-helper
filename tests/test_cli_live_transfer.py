@@ -132,3 +132,83 @@ def test_codex_send_receive_round_trips_over_localhost_tcp(tmp_path):
     assert received["tokens"]["access_token"] == access_token
     assert received["tokens"]["refresh_token"] == "rt_live_test"
     assert recv_auth.stat().st_mode & 0o077 == 0
+
+
+def test_codex_send_claude_receive_mismatch_over_localhost_tcp(tmp_path):
+    """Sender labels the transfer 'codex'; receiver is pinned to 'claude'.
+
+    Both processes must exit 1, both stderrs must mention the mismatch, and
+    neither store may be touched.
+    """
+    nc_binary = Path(os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc"))
+    if not nc_binary.exists():
+        pytest.skip(f"{nc_binary} not available for CLI --send")
+
+    send_home = tmp_path / "send-home"
+    recv_home = tmp_path / "recv-home"
+    send_auth = send_home / ".codex" / "auth.json"
+    send_auth.parent.mkdir(parents=True)
+
+    access_token = _jwt_with_exp(int(time.time()) + 3600)
+    payload = {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": access_token,
+            "refresh_token": "rt_live_mismatch",
+            "account_id": "acct-live-mismatch",
+        },
+        "last_refresh": "2026-06-28T00:00:00Z",
+    }
+    send_auth.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
+    os.chmod(send_auth, 0o600)
+
+    port = _free_localhost_port()
+    env = os.environ.copy()
+    env["CLAUDE_CREDENTIALS_PASSPHRASE"] = "pytest-localhost-mismatch"
+
+    recv_env = env | {"HOME": str(recv_home)}
+    send_env = env | {"HOME": str(send_home)}
+
+    receiver = subprocess.Popen(
+        [
+            sys.executable, "-m", "ai_credentials_helper.cli",
+            "--agent", "claude",
+            "--receive", "--port", str(port),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=recv_env,
+    )
+    send_result = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            send_result = subprocess.run(
+                [
+                    sys.executable, "-m", "ai_credentials_helper.cli",
+                    "--agent", "codex",
+                    "--send", "127.0.0.1", "--send-port", str(port),
+                ],
+                capture_output=True, text=True, env=send_env, timeout=10,
+            )
+            if receiver.poll() is not None:
+                break
+            if send_result.returncode != 0 and "mismatch" in (send_result.stderr or ""):
+                break
+            time.sleep(0.1)
+        recv_stdout, recv_stderr = receiver.communicate(timeout=10)
+    finally:
+        if receiver.poll() is None:
+            receiver.kill()
+            receiver.communicate()
+
+    assert send_result is not None
+    assert send_result.returncode == 1, send_result.stdout
+    assert receiver.returncode == 1, recv_stderr
+    assert "mismatch" in send_result.stderr
+    assert "mismatch" in recv_stderr
+    assert not (recv_home / ".codex" / "auth.json").exists()
+    # The sender's own store must also be untouched -- --send never writes.
+    still_original = json.loads(send_auth.read_text())
+    assert still_original["tokens"]["account_id"] == "acct-live-mismatch"

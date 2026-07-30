@@ -302,3 +302,25 @@ def test_refresh_tokens_none_when_no_access_token(monkeypatch):
 def test_refresh_tokens_defaults_refresh_and_expiry(monkeypatch):
     monkeypatch.setattr(creds, "urlopen", lambda req, **kw: _resp({"access_token": "new_a"}))
     assert creds.refresh_tokens("keep_r") == ("new_a", "keep_r", 3600)
+
+
+def test_validate_blob_accepts_a_real_claude_document():
+    creds.validate_blob({"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt"}})
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        ([], "must be a JSON object"),
+        ({}, "missing or non-dict 'claudeAiOauth'"),
+        ({"claudeAiOauth": None}, "missing or non-dict 'claudeAiOauth'"),
+        # A codex auth.json parses as JSON but is not claude credentials.
+        ({"tokens": {"access_token": "a"}}, "missing or non-dict 'claudeAiOauth'"),
+        ({"claudeAiOauth": {}}, "accessToken must be a non-empty string"),
+        ({"claudeAiOauth": {"accessToken": ""}}, "accessToken must be a non-empty string"),
+        ({"claudeAiOauth": {"accessToken": 7}}, "accessToken must be a non-empty string"),
+    ],
+)
+def test_validate_blob_rejects_wrong_shapes(data, expected):
+    with pytest.raises(creds.CredentialsError, match=expected):
+        creds.validate_blob(data)

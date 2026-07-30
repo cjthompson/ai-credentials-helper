@@ -172,3 +172,22 @@ def test_interop_python_encrypt_openssl_decrypt():
         check=True,
     ).stdout
     assert recovered.decode() == PLAINTEXT
+
+
+def test_frame_salt_matches_derive_salt():
+    frame = tc.encrypt(PLAINTEXT, PASSPHRASE)
+    b64 = frame.splitlines()[0]
+    blob = base64.b64decode(b64)
+    assert tc.frame_salt(frame) == blob[: tc.SALT_LEN]
+
+
+def test_mac_key_for_frame_matches_derive():
+    frame = tc.encrypt(PLAINTEXT, PASSPHRASE)
+    salt = tc.frame_salt(frame)
+    _enc_key, _iv, mac_key = tc._derive(PASSPHRASE, salt)
+    assert tc.mac_key_for_frame(frame, PASSPHRASE) == mac_key
+
+
+def test_frame_salt_rejects_malformed_frame():
+    with pytest.raises(tc.DecryptionError):
+        tc.frame_salt("not a valid frame")

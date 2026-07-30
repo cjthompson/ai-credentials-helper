@@ -37,6 +37,10 @@ class Backend(Protocol):
         """Replace the active store with ``content`` in its backend-native representation."""
         ...
 
+    def validate_blob(self, data: dict) -> None:
+        """Raise ``CredentialsError`` if ``data`` isn't this agent's credential shape."""
+        ...
+
     def find_account(self) -> str | None:
         """Return an account-like identifier (keychain acct, account_id, ...) or None."""
         ...

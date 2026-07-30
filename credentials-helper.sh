@@ -5,6 +5,11 @@
 # For ``codex`` or other agents, use the Python CLI:
 #     credentials-helper --agent codex --simple
 #
+# Note: this script's --send/--receive use a plaintext, unencrypted wire
+# format and do not interoperate with the Python CLI's --send/--receive
+# (which are end-to-end encrypted and, as of this version, label the
+# transfer with an agent name). Do not mix the two across a transfer.
+#
 # Usage: ./credentials-helper.sh [--raw | --simple | --refresh | --oauth-only]
 #        ./credentials-helper.sh --import <file|->
 #        ./credentials-helper.sh [--oauth-only] --send <host> [--send-port <port>]

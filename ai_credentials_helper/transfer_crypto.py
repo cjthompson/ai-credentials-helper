@@ -1,9 +1,14 @@
 """Authenticated encryption for credential transfer (``--send`` / ``--receive``).
 
-The Python CLI owns this wire format. Encryption and authentication are
-implemented with ``cryptography`` plus Python's standard library and work the
-same way on macOS, Linux, and WSL. The legacy ``credentials-helper.sh`` script
-is not wire-compatible and is outside this module's contract.
+The KDF/AES *primitive* (PBKDF2-HMAC-SHA256 key schedule + AES-256-CBC) is
+shared with the standalone ``credentials-helper.sh``, which performs the AES
+step with the macOS ``openssl`` (LibreSSL) CLI and everything else with the
+system ``python3`` stdlib -- both sides agree on that one construction. The
+wire *framing* built on top of it (the agent-identity envelope in
+``ai_credentials_helper.transfer_envelope``, and the authenticated ACK) is
+specific to this Python CLI; ``credentials-helper.sh``'s own ``--send``/
+``--receive`` use a different, unencrypted framing and do not interoperate
+with this module's frame beyond that shared primitive.
 
 Construction: **AES-256-CBC + HMAC-SHA256, encrypt-then-MAC.**
 
@@ -62,11 +67,13 @@ def encrypt(plaintext: str, passphrase: str) -> str:
     return f"{base64.b64encode(blob).decode()}\n{tag}\n"
 
 
-def decrypt(frame: str, passphrase: str) -> str:
-    """Verify+decrypt a wire ``frame``; raise :class:`DecryptionError` on any failure.
+def _parse_frame(frame: str) -> tuple[bytes, str]:
+    """Parse+validate a wire frame's two lines; return ``(blob, tag_hex)``.
 
-    The HMAC is checked (constant-time) **before** decryption, so a wrong
-    passphrase or a forged/tampered frame is rejected without ever decrypting.
+    ``blob`` is ``salt || ciphertext`` (undecoded). Raises DecryptionError on
+    any malformed shape -- this is exactly the line-1/line-2 validation
+    ``decrypt`` always did; it's factored out so ``frame_salt`` can reuse it
+    without duplicating the rules or needing a passphrase.
     """
     lines = [ln for ln in frame.splitlines() if ln.strip()]
     if len(lines) != 2:  # exactly base64-blob + hex-tag; reject extras
@@ -77,10 +84,43 @@ def decrypt(frame: str, passphrase: str) -> str:
         raise DecryptionError("malformed transfer frame") from e
     if len(blob) <= SALT_LEN:
         raise DecryptionError("malformed transfer frame")
-
     tag_hex = lines[1].strip()
     if len(tag_hex) != 64 or not all(c in "0123456789abcdef" for c in tag_hex.lower()):
         raise DecryptionError("malformed transfer frame")
+    return blob, tag_hex
+
+
+def frame_salt(frame: str) -> bytes:
+    """Return the salt embedded in a wire ``frame`` (first ``SALT_LEN`` bytes of the blob).
+
+    Raises DecryptionError if the frame's *shape* is malformed. Does **not**
+    require or check the passphrase/HMAC -- it only needs the frame to be
+    two well-formed lines, so it can succeed even when the frame's tag will
+    later fail to verify under a given passphrase. Used to derive the ACK's
+    mac_key on both ends without re-doing a full decrypt.
+    """
+    blob, _tag_hex = _parse_frame(frame)
+    return blob[:SALT_LEN]
+
+
+def mac_key_for_frame(frame: str, passphrase: str) -> bytes:
+    """Return the HMAC key used for both the frame and its ACK.
+
+    Same derivation as ``_derive(...)[2]``, applied to the frame's own salt,
+    so the sender (who has passphrase + frame) and the receiver (who has
+    passphrase + received frame) compute an identical mac_key with no extra
+    round trip.
+    """
+    return _derive(passphrase, frame_salt(frame))[2]
+
+
+def decrypt(frame: str, passphrase: str) -> str:
+    """Verify+decrypt a wire ``frame``; raise :class:`DecryptionError` on any failure.
+
+    The HMAC is checked (constant-time) **before** decryption, so a wrong
+    passphrase or a forged/tampered frame is rejected without ever decrypting.
+    """
+    blob, tag_hex = _parse_frame(frame)
     salt, ciphertext = blob[:SALT_LEN], blob[SALT_LEN:]
     enc_key, iv, mac_key = _derive(passphrase, salt)
 

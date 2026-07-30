@@ -74,6 +74,8 @@ Omit `--agent codex` to select Claude. Omit the environment variable to enter th
 
 For Claude transfers from macOS to Linux/WSL, the receiver converts a hex-encoded Keychain blob to Claude Code's JSON credential-file format automatically. Linux/WSL writes use an atomic replacement and `0600` file permissions. A malformed or unauthenticated payload is rejected before replacement.
 
+The receiver may omit `--agent` entirely — it adopts whichever agent the sender labeled the transfer with, and prints `Detected agent: <name> (from sender)` before writing. Passing a `--agent` that differs from the sender's is a hard error on both ends: the receiver's store is left untouched and the sender's exit code reflects the rejection. Both ends must be running a version of this tool that supports this agent label; an older, unlabelled payload is rejected outright.
+
 ## Security
 
 - `--raw`, `--simple`, and verbose receive output can expose credentials in the terminal.
