@@ -1,9 +1,11 @@
 """Unit and OpenSSL interoperability tests for credential-transfer crypto.
 
-The interoperability tests exercise AES-256-CBC through the local ``openssl``
-binary while Python owns the authenticated frame construction. They verify the
-cryptographic primitive boundary without modeling or claiming compatibility
-with the legacy ``credentials-helper.sh`` script.
+The interop tests shell out to the real `openssl` binary (LibreSSL on macOS)
+and cross-check it byte for byte against our `cryptography`-based
+implementation. Two independent implementations of the same standard
+construction — the one spot that can silently break across crypto libraries,
+and the check that catches a change which stays self-consistent but is no
+longer the standard construction.
 """
 
 import base64
@@ -135,11 +137,13 @@ def test_authenticated_frame_with_non_utf8_plaintext_rejected():
         tc.decrypt(frame, PASSPHRASE)
 
 
-# ── Interop with the local openssl AES primitive ───────────────────────────────
+# ── Interop with the real openssl binary (LibreSSL on macOS) ──────────────────
+# Builds the frame without touching transfer_crypto: PBKDF2/HMAC via stdlib,
+# AES-256-CBC via `openssl enc -K/-iv -nosalt`.
 
 
 def _openssl_frame(plaintext: str, passphrase: str, salt: bytes) -> str:
-    """Produce an authenticated frame using openssl for the AES step."""
+    """Produce a wire frame independently of transfer_crypto (openssl for AES)."""
     material = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, tc.PBKDF2_ITERATIONS, 80)
     enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
     ciphertext = subprocess.run(

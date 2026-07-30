@@ -1,9 +1,9 @@
 """CLI for managing OAuth credentials for supported AI agents.
 
 Installed as the ``credentials-helper`` console script (and runnable via
-``python -m ai_credentials_helper.cli``). A pure-Python counterpart to
-``credentials-helper.sh`` — same CLI surface, no bash/jq/xxd/curl. All storage
-and OAuth work is delegated to the shared ``ai_credentials_helper.credentials`` module.
+``python -m ai_credentials_helper.cli``). Pure Python — no bash/jq/xxd/curl.
+All storage and OAuth work is delegated to the shared
+``ai_credentials_helper.credentials`` module.
 
 Modes (mutually exclusive, except --oauth-only which may accompany --send).
 With no arguments, prints help (it does not dump credentials by default).

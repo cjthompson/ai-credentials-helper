@@ -1,14 +1,13 @@
 """Authenticated encryption for credential transfer (``--send`` / ``--receive``).
 
-The KDF/AES *primitive* (PBKDF2-HMAC-SHA256 key schedule + AES-256-CBC) is
-shared with the standalone ``credentials-helper.sh``, which performs the AES
-step with the macOS ``openssl`` (LibreSSL) CLI and everything else with the
-system ``python3`` stdlib -- both sides agree on that one construction. The
-wire *framing* built on top of it (the agent-identity envelope in
-``ai_credentials_helper.transfer_envelope``, and the authenticated ACK) is
-specific to this Python CLI; ``credentials-helper.sh``'s own ``--send``/
-``--receive`` use a different, unencrypted framing and do not interoperate
-with this module's frame beyond that shared primitive.
+The KDF/AES *primitive* (PBKDF2-HMAC-SHA256 key schedule + AES-256-CBC) is a
+standard construction, cross-checked against the macOS ``openssl`` (LibreSSL)
+CLI by the interop tests in ``tests/test_transfer_crypto.py``. Those build the
+same frame with an entirely separate implementation, so a change here that
+stays self-consistent but drifts off the standard fails there rather than
+shipping silently. The wire *framing* built on top of the primitive -- the
+agent-identity envelope in ``ai_credentials_helper.transfer_envelope`` and the
+authenticated ACK -- is specific to this CLI and is not a shared format.
 
 Construction: **AES-256-CBC + HMAC-SHA256, encrypt-then-MAC.**
 
