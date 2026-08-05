@@ -1,8 +1,8 @@
 """Codex CLI credentials backend — JSON file at ``~/.codex/auth.json``.
 
-Unlike Claude's macOS-only Keychain storage, Codex stores OAuth tokens in a
-plain JSON file. We read/write it with ``0600`` permissions so the access
-token isn't world-readable. The schema is::
+Codex stores OAuth tokens in a plain JSON file on every supported platform.
+Claude uses the macOS Keychain on macOS and a JSON credential file on Linux
+and WSL. The schema is::
 
     {
       "auth_mode": "chatgpt",

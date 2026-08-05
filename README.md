@@ -1,12 +1,12 @@
 # AI Credentials Helper
 
-`ai-credentials-helper` reads, inspects, imports, and securely transfers OAuth credentials used by AI coding agents. It supports Claude Code credentials in the macOS Keychain and Codex CLI credentials in `~/.codex/auth.json`.
+`ai-credentials-helper` securely copies OAuth credentials used by AI coding agents between computers. It supports Claude Code credentials in the macOS Keychain or Linux/WSL `${CLAUDE_CONFIG_DIR:-~/.claude}/.credentials.json`, plus Codex CLI credentials in `~/.codex/auth.json`.
 
 Claude is the default backend. Pass `--agent codex` to work with Codex credentials.
 
 ## Requirements
 
-- macOS
+- macOS, native Linux, or WSL
 - Python 3.12 or newer
 - [`uv`](https://docs.astral.sh/uv/) is recommended but optional
 
@@ -22,7 +22,7 @@ The installer creates `.venv`, installs the package, and links `credentials-help
 
 ## Usage
 
-Claude Code uses the macOS Keychain and is selected by default:
+Claude Code uses the macOS Keychain on macOS and `${CLAUDE_CONFIG_DIR:-~/.claude}/.credentials.json` on Linux and WSL. The helper selects the correct store automatically; continue to use `--agent claude` or omit `--agent`, since Claude is the default.
 
 ```bash
 credentials-helper --simple
@@ -50,7 +50,11 @@ Run `credentials-helper --help` for all options.
 
 ## Encrypted transfer
 
-Transfers use authenticated encryption over a one-shot TCP connection. Start the receiver first, then run the sender with the same agent and passphrase.
+Transfers use authenticated encryption over a one-shot TCP connection and work macOS ↔ Linux/WSL and Linux/WSL ↔ Linux/WSL for both Claude and Codex. Start the receiver first, then run the sender with the same `--agent` value and passphrase. Use `--agent claude` for Claude Code or `--agent codex` for Codex CLI.
+
+`credentials-helper.sh` is a legacy, macOS-only Claude implementation. It is not wire-compatible with the authenticated Python transfer protocol. Use the installed `credentials-helper` Python CLI for all cross-computer copying.
+
+The Python CLI uses Apple's `/usr/bin/nc` for outbound connections on macOS and native Python sockets on Linux and WSL. No Linux `netcat` package is required. The receiving machine must be reachable at the host and port supplied by the sender; WSL firewall or NAT configuration remains the responsibility of the host environment.
 
 On the receiving machine:
 
@@ -66,7 +70,9 @@ export CLAUDE_CREDENTIALS_PASSPHRASE='same-secret-on-both-machines'
 credentials-helper --agent codex --send 192.168.1.42
 ```
 
-Omit the environment variable to enter the passphrase interactively. The default port is `47299`; override it with `--port` on the receiver and `--send-port` on the sender. Use `--oauth-only` with `--send` to transfer only the portable token subset.
+Omit `--agent codex` to select Claude. Omit the environment variable to enter the passphrase interactively. The default port is `47299`; override it with `--port` on the receiver and `--send-port` on the sender. Use `--oauth-only` with `--send` to transfer only the portable token subset.
+
+For Claude transfers from macOS to Linux/WSL, the receiver converts a hex-encoded Keychain blob to Claude Code's JSON credential-file format automatically. Linux/WSL writes use an atomic replacement and `0600` file permissions. A malformed or unauthenticated payload is rejected before replacement.
 
 ## Security
 

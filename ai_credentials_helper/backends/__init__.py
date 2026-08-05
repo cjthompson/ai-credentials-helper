@@ -1,9 +1,7 @@
-"""Storage backends for different AI agents (claude, codex, ...).
+"""Storage backends for supported AI agents.
 
-Each backend owns its own storage adapter — macOS Keychain for claude, JSON
-file for codex, etc. The ``Backend`` protocol is the contract the CLI and
-``credentials`` facade dispatch against. New agents add one file in this
-directory and one entry in ``BACKENDS`` — nothing else changes.
+Claude uses the macOS Keychain on macOS and a JSON credential file on Linux
+and WSL. Codex uses a JSON credential file on every supported platform.
 """
 
 from typing import Protocol
@@ -31,8 +29,12 @@ class Backend(Protocol):
         """Return the parsed JSON form of :meth:`read_raw`."""
         ...
 
+    def validate_blob(self, data: object) -> None:
+        """Reject parsed data that is not safe to write to this backend."""
+        ...
+
     def write(self, content: str) -> None:
-        """Replace the existing entry with ``content`` verbatim."""
+        """Replace the active store with ``content`` in its backend-native representation."""
         ...
 
     def find_account(self) -> str | None:

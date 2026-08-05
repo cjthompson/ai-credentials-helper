@@ -1,4 +1,4 @@
-"""Unit tests for the Claude backend (macOS Keychain + OAuth).
+"""Unit tests for Claude's platform-native credential storage and OAuth behavior.
 
 Tests import the backend module directly because they patch attributes
 (``subprocess.run``, ``urlopen``) on the backend itself; the facade
@@ -28,6 +28,8 @@ def _proc(returncode=0, stdout=b"", stderr=b""):
 @pytest.fixture
 def fake_security(monkeypatch):
     """Mock the `security` CLI; tweak behavior via the returned state dict."""
+    monkeypatch.setattr(creds, "KEYCHAIN_SERVICE", "Claude Code-credentials")
+    monkeypatch.setattr(creds, "AUTH_PATH", None, raising=False)
     state = {
         "blob": FULL_JSON,  # what `find ... -w` returns (str), or None for "missing"
         "meta": '    "acct"<blob>="me@example.com"',  # what `find` (no -w) returns
@@ -95,6 +97,134 @@ def test_parse_blob_accepts_json_and_hex_and_rejects_garbage():
     for bad in ("", "   ", "not a blob", "zz", "{not json}"):
         with pytest.raises(ValueError):
             creds.parse_blob(bad)
+
+
+def test_linux_auth_path_defaults_to_claude_directory(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(creds.Path, "home", classmethod(lambda _cls: creds.Path("/home/tester")))
+    assert creds._linux_auth_path() == creds.Path("/home/tester/.claude/.credentials.json")
+
+
+def test_linux_auth_path_honors_claude_config_dir(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/srv/claude-config")
+    assert creds._linux_auth_path() == creds.Path("/srv/claude-config/.credentials.json")
+
+
+def test_require_auth_path_rejects_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(creds, "KEYCHAIN_SERVICE", None)
+    monkeypatch.setattr(creds, "AUTH_PATH", None)
+    with pytest.raises(creds.CredentialsError, match="supported only on macOS, Linux, and WSL"):
+        creds._require_auth_path()
+
+
+@pytest.mark.parametrize(
+    "data, message",
+    [
+        ([], "top-level value must be a JSON object"),
+        ({}, "missing or non-dict 'claudeAiOauth' object"),
+        ({"claudeAiOauth": []}, "missing or non-dict 'claudeAiOauth' object"),
+        ({"claudeAiOauth": {"accessToken": "", "refreshToken": "r"}}, "accessToken"),
+        ({"claudeAiOauth": {"accessToken": "a", "refreshToken": ""}}, "refreshToken"),
+    ],
+)
+def test_validate_blob_rejects_non_credentials(data, message):
+    with pytest.raises(creds.CredentialsError, match=message):
+        creds.validate_blob(data)
+
+
+def test_validate_blob_accepts_oauth_credentials():
+    creds.validate_blob(FULL)
+
+
+def test_keychain_write_preserves_verbatim_non_oauth_document(fake_security):
+    content = '{"customCredential":"preserve-verbatim"}'
+    creds.write(content)
+    (argv,) = fake_security["writes"]
+    assert argv[argv.index("-w") + 1] == content
+
+
+def test_keychain_write_accepts_linux_json(fake_security):
+    creds.write(FULL_JSON)
+    (argv,) = fake_security["writes"]
+    assert argv[argv.index("-w") + 1] == FULL_JSON
+
+
+@pytest.fixture
+def linux_credentials(tmp_path, monkeypatch):
+    auth_path = tmp_path / ".claude" / ".credentials.json"
+    monkeypatch.setattr(creds, "KEYCHAIN_SERVICE", None)
+    monkeypatch.setattr(creds, "AUTH_PATH", auth_path)
+    return auth_path
+
+
+def test_linux_read_raw_reads_json_file(linux_credentials):
+    linux_credentials.parent.mkdir(parents=True)
+    linux_credentials.write_text(FULL_JSON + "\n")
+    assert creds.read_raw() == FULL_JSON
+
+
+def test_linux_read_raw_reports_missing_file(linux_credentials):
+    with pytest.raises(creds.CredentialsError, match="No credentials found"):
+        creds.read_raw()
+
+
+def test_linux_write_creates_private_file_and_directory(linux_credentials):
+    creds.write(FULL_JSON)
+    assert json.loads(linux_credentials.read_text()) == FULL
+    assert linux_credentials.stat().st_mode & 0o077 == 0
+    assert linux_credentials.parent.stat().st_mode & 0o077 == 0
+
+
+def test_linux_write_normalizes_hex_keychain_blob(linux_credentials):
+    creds.write(FULL_JSON.encode().hex())
+    assert json.loads(linux_credentials.read_text()) == FULL
+    assert not linux_credentials.read_text().startswith(FULL_JSON.encode().hex()[:16])
+
+
+def test_linux_write_validation_leaves_existing_file_unchanged(linux_credentials):
+    linux_credentials.parent.mkdir(parents=True)
+    linux_credentials.write_text(FULL_JSON + "\n")
+    before = linux_credentials.read_bytes()
+    with pytest.raises(creds.CredentialsError, match="accessToken"):
+        creds.write('{"claudeAiOauth":{"accessToken":"","refreshToken":"r"}}')
+    assert linux_credentials.read_bytes() == before
+
+
+def test_linux_write_uses_atomic_replace(linux_credentials, monkeypatch):
+    replaced = []
+    real_replace = creds.os.replace
+
+    def spy_replace(source, destination):
+        replaced.append((creds.Path(source).parent, creds.Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(creds.os, "replace", spy_replace)
+    creds.write(FULL_JSON)
+    assert replaced == [(linux_credentials.parent, linux_credentials)]
+
+
+def test_linux_write_replace_failure_preserves_existing_and_cleans_temp(
+    linux_credentials, monkeypatch
+):
+    linux_credentials.parent.mkdir(parents=True)
+    linux_credentials.write_text(FULL_JSON + "\n")
+    before = linux_credentials.read_bytes()
+
+    def fail_replace(*_args):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(creds.os, "replace", fail_replace)
+
+    with pytest.raises(creds.CredentialsError, match="Cannot write"):
+        creds.write(FULL_JSON)
+
+    assert linux_credentials.read_bytes() == before
+    temp_prefix = f".{linux_credentials.name}."
+    assert [p for p in linux_credentials.parent.iterdir() if p.name.startswith(temp_prefix)] == []
+
+
+def test_linux_find_account_is_none(linux_credentials):
+    assert creds.find_account() is None
 
 
 def test_oauth_only_json_strips_other_keys_and_has_no_trailing_newline(fake_security):

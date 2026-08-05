@@ -35,14 +35,15 @@ def _free_localhost_port() -> int:
 
 
 def test_codex_send_receive_round_trips_over_localhost_tcp(tmp_path):
-    """Exercise real CLI subprocesses, encryption, nc send, and socket receive.
+    """Exercise real CLI subprocesses, encryption, platform-selected send, and socket receive.
 
     The test uses two temporary HOME directories so it never reads or writes the
     developer's real ``~/.codex/auth.json``.
     """
-    nc_binary = Path(os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc"))
-    if not nc_binary.exists():
-        pytest.skip(f"{nc_binary} not available for CLI --send")
+    if sys.platform == "darwin":
+        nc_binary = Path(os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc"))
+        if not nc_binary.exists():
+            pytest.skip(f"{nc_binary} not available for CLI --send")
 
     send_home = tmp_path / "send-home"
     recv_home = tmp_path / "recv-home"

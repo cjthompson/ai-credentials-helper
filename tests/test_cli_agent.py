@@ -172,8 +172,16 @@ def test_cli_refresh_codex_returns_error(fake_codex_auth, restore_backend, capsy
 
 def test_credentials_facade_re_exposes_known_constants(restore_backend):
     # The facade should expose claude's constants by default for back-compat.
-    assert creds.KEYCHAIN_SERVICE == "Claude Code-credentials"
+    from ai_credentials_helper.backends import claude
+
     assert creds.CLIENT_ID == "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    if sys.platform == "darwin":
+        assert creds.KEYCHAIN_SERVICE == "Claude Code-credentials"
+        assert claude.AUTH_PATH is None
+    elif sys.platform == "linux":
+        assert creds.KEYCHAIN_SERVICE is None
+        assert claude.AUTH_PATH is not None
+        assert claude.AUTH_PATH.name == ".credentials.json"
 
 
 def test_parse_blob_dispatches_for_both_backends(restore_backend):
@@ -189,9 +197,13 @@ def test_parse_blob_dispatches_for_both_backends(restore_backend):
     assert creds.parse_blob(codex_sample)["tokens"]["account_id"] == "x"
 
 
-def test_store_label_uses_backend_specific_noun(restore_backend):
+def test_store_label_uses_backend_specific_noun(restore_backend, monkeypatch):
     """Regression: --import/--receive used to print 'None' for codex because
     the messages referenced creds.KEYCHAIN_SERVICE, which codex doesn't have."""
+    from ai_credentials_helper.backends import claude
+
+    monkeypatch.setattr(claude, "KEYCHAIN_SERVICE", "Claude Code-credentials")
+    monkeypatch.setattr(claude, "AUTH_PATH", None)
     creds.set_backend("claude")
     assert "keychain service" in cli._store_label()
     assert "'Claude Code-credentials'" in cli._store_label()
@@ -199,6 +211,17 @@ def test_store_label_uses_backend_specific_noun(restore_backend):
     creds.set_backend("codex")
     assert "auth file" in cli._store_label()
     assert "None" not in cli._store_label()
+
+
+def test_store_label_uses_linux_claude_auth_path(restore_backend, tmp_path, monkeypatch):
+    from ai_credentials_helper.backends import claude
+
+    auth_path = tmp_path / ".claude" / ".credentials.json"
+    monkeypatch.setattr(claude, "KEYCHAIN_SERVICE", None)
+    monkeypatch.setattr(claude, "AUTH_PATH", auth_path)
+    creds.set_backend("claude")
+
+    assert cli._store_label() == f"auth file {str(auth_path)!r}"
 
 
 def test_receive_decryption_failure_names_active_store(
@@ -222,6 +245,26 @@ def test_receive_invalid_blob_names_active_store(restore_backend, monkeypatch, c
     monkeypatch.setattr(cli.transfer_crypto, "decrypt", lambda *_args: "not json")
 
     assert cli._do_receive(0) == 1
+    assert f"{cli._store_label()} left unchanged" in capsys.readouterr().err
+
+
+def test_receive_rejects_wrong_claude_shape_before_write(
+    restore_backend, monkeypatch, capsys
+):
+    from ai_credentials_helper.backends import claude
+
+    _fake_receive_socket(monkeypatch)
+    monkeypatch.setattr(
+        cli.transfer_crypto,
+        "decrypt",
+        lambda *_args: '{"notClaudeCredentials":true}',
+    )
+    writes = []
+    monkeypatch.setattr(claude, "write", writes.append)
+    creds.set_backend("claude")
+
+    assert cli._do_receive(0) == 1
+    assert writes == []
     assert f"{cli._store_label()} left unchanged" in capsys.readouterr().err
 
 

@@ -14,7 +14,8 @@ With no arguments, prints help (it does not dump credentials by default).
   --oauth-only     Print only the portable token subset as compact JSON.
   --refresh        Refresh the access token, write it back, print --simple form.
                    (Claude only; codex refreshes tokens itself on use.)
-  --import <file|-> Write raw bytes (file or stdin) verbatim.
+  --import <file|-> Replace the active store from a file or stdin in its
+                   backend-native representation.
   --send <host>    Encrypt the blob and send it to <host> over TCP (the
                    receiver must be running --receive first). With --oauth-only,
                    send only the portable token subset.
@@ -45,11 +46,12 @@ log = logging.getLogger("ai_credentials_helper.cli")
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
 
-# --send delegates the outbound TCP write to `nc`, an Apple platform binary that
-# is exempt from macOS Local Network Privacy. A third-party (Homebrew/uv/etc.)
-# venv python is blocked from LAN connect()s (EHOSTUNREACH); nc is not. Only the
-# OUTBOUND hop is gated — --receive (bind/listen/accept) works natively in the
-# venv python, so it is not delegated. Overridable via env for tests.
+# On macOS, --send delegates the outbound TCP write to `nc`, an Apple platform
+# binary exempt from Local Network Privacy. A third-party (Homebrew/uv/etc.)
+# venv Python is blocked from LAN connect()s (EHOSTUNREACH); nc is not. Linux
+# and WSL use the native socket path. Only the OUTBOUND hop is gated — --receive
+# (bind/listen/accept) works natively in the venv Python, so it is not delegated.
+# Overridable via env for tests.
 NC_BINARY = os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc")
 
 
@@ -58,6 +60,46 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ[name])
     except (KeyError, ValueError):
         return default
+
+
+def _send_frame_native(frame: bytes, host: str, port: int) -> str | None:
+    try:
+        with socket.create_connection((host, port), timeout=SEND_TIMEOUT) as conn:
+            conn.sendall(frame)
+            conn.shutdown(socket.SHUT_WR)
+    except socket.timeout:
+        return f"timed out after {SEND_TIMEOUT}s"
+    except OSError as exc:
+        return str(exc) or "native socket error"
+    return None
+
+
+def _send_frame_nc(frame: bytes, host: str, port: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            [NC_BINARY, "-w", str(SEND_TIMEOUT), host, str(port)],
+            input=frame,
+            capture_output=True,
+            timeout=SEND_TIMEOUT + 5,
+        )
+    except FileNotFoundError:
+        return f"{NC_BINARY} not found"
+    except subprocess.TimeoutExpired:
+        return f"timed out after {SEND_TIMEOUT}s"
+    if proc.returncode != 0:
+        return proc.stderr.decode(errors="replace").strip() or f"nc exited {proc.returncode}"
+    return None
+
+
+def _send_frame(frame: bytes, host: str, port: int) -> tuple[str | None, str]:
+    if sys.platform == "darwin":
+        return _send_frame_nc(frame, host, port), NC_BINARY
+    if sys.platform == "linux":
+        return _send_frame_native(frame, host, port), "native socket"
+    return (
+        "credential transfer is supported only on macOS, Linux, and WSL",
+        "unsupported platform",
+    )
 
 
 # Bound a hostile or buggy peer on --receive: drop a connection that goes idle,
@@ -139,7 +181,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only the portable token subset for the selected backend "
         "(alone, or as a --send modifier)",
     )
-    p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
+    p.add_argument(
+        "--import",
+        dest="import_path",
+        metavar="<file|->",
+        help="replace the active store in its backend-native representation",
+    )
     p.add_argument(
         "--send", dest="send_host", metavar="<host>", help="encrypt and send the blob over TCP"
     )
@@ -223,33 +270,14 @@ def _do_import(import_path: str) -> int:
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
     plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
     frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
-    # Hand the encrypted frame to nc for the outbound TCP write (see NC_BINARY).
-    # nc half-closes its write side on stdin EOF, so the receiver reads to EOF;
-    # the send->receive roundtrip test pins this (it would hang otherwise).
-    # Do NOT add `-N`: on macOS, nc is Apple's variant where `-N num_probes` is
-    # --apple-tcp-adp-wtimo (needs a numeric arg), not OpenBSD's shutdown-on-EOF
-    # flag — passing it errors with "invalid tcp adaptive write timeout value".
-    log.debug("send: target %s:%d via %s, %d-byte frame", host, port, NC_BINARY, len(frame))
     started = time.monotonic()
-    try:
-        proc = subprocess.run(
-            [NC_BINARY, "-w", str(SEND_TIMEOUT), host, str(port)],
-            input=frame,
-            capture_output=True,
-            timeout=SEND_TIMEOUT + 5,
-        )
-    except FileNotFoundError:
-        _err(f"Error: {NC_BINARY} not found (needed to send)")
+    error, transport = _send_frame(frame, host, port)
+    if error is not None:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        log.debug("send: %s failed after %.0f ms — %s", transport, elapsed_ms, error)
+        _err(f"Error: could not send to {host}:{port} — {error}")
         return 1
-    except subprocess.TimeoutExpired:
-        _err(f"Error: send to {host}:{port} timed out after {SEND_TIMEOUT}s")
-        return 1
-    if proc.returncode != 0:
-        detail = proc.stderr.decode(errors="replace").strip() or f"nc exited {proc.returncode}"
-        log.debug("send: nc failed after %.0f ms — %s", (time.monotonic() - started) * 1000, detail)
-        _err(f"Error: could not send to {host}:{port} — {detail}")
-        return 1
-    log.debug("send: nc ok in %.0f ms", (time.monotonic() - started) * 1000)
+    log.debug("send: %s ok in %.0f ms", transport, (time.monotonic() - started) * 1000)
     note = " (oauth-only)" if oauth_only else ""
     _err(f"Sent {len(frame)} encrypted bytes to {host}:{port} via TCP{note}")
     return 0
@@ -306,8 +334,9 @@ def _do_receive(port: int, verbose: bool = False) -> int:
     # anything else before overwriting the active store; an authentic HMAC alone
     # doesn't make a payload a valid blob, and writing garbage would corrupt it.
     try:
-        creds.parse_blob(content)
-    except ValueError:
+        data = creds.parse_blob(content)
+        creds.validate_blob(data)
+    except (ValueError, creds.CredentialsError):
         _err(
             "Error: decrypted payload is not a valid credential blob; "
             f"{_store_label()} left unchanged"

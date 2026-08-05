@@ -1,12 +1,11 @@
 """Authenticated encryption for credential transfer (``--send`` / ``--receive``).
 
-The wire format is shared with the standalone ``claude-credentials.sh``, which
-performs the AES step with the macOS ``openssl`` (LibreSSL) CLI and everything
-else with the system ``python3`` stdlib. Both sides therefore agree on one
-format — the same standard, two libraries.
+The Python CLI owns this wire format. Encryption and authentication are
+implemented with ``cryptography`` plus Python's standard library and work the
+same way on macOS, Linux, and WSL. The legacy ``credentials-helper.sh`` script
+is not wire-compatible and is outside this module's contract.
 
-Construction: **AES-256-CBC + HMAC-SHA256, encrypt-then-MAC.** GCM is avoided
-because the ``openssl enc`` CLI cannot safely handle the AEAD tag.
+Construction: **AES-256-CBC + HMAC-SHA256, encrypt-then-MAC.**
 
 Key schedule (identical on both sides)::
 

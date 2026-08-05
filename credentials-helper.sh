@@ -11,6 +11,11 @@
 
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "Error: credentials-helper.sh is macOS-only. Use the Python CLI on Linux or WSL: credentials-helper --help" >&2
+  exit 1
+fi
+
 SERVICE="Claude Code-credentials"
 TOKEN_URL="https://platform.claude.com/v1/oauth/token"
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -413,4 +418,3 @@ echo "access_token:  $access_token"
 echo "refresh_token: $refresh_token"
 echo "expires_at:    $expires_at_ms"
 echo "expires:       $expires_local"
-

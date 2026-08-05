@@ -1,8 +1,9 @@
-"""Unit + interop tests for ai_credentials_helper.transfer_crypto.
+"""Unit and OpenSSL interoperability tests for credential-transfer crypto.
 
-The interop tests shell out to the real `openssl` binary (LibreSSL on macOS) to
-prove byte-level wire compatibility with the standalone credentials-helper.sh —
-the one spot that can silently break across crypto libraries.
+The interoperability tests exercise AES-256-CBC through the local ``openssl``
+binary while Python owns the authenticated frame construction. They verify the
+cryptographic primitive boundary without modeling or claiming compatibility
+with the legacy ``credentials-helper.sh`` script.
 """
 
 import base64
@@ -18,8 +19,7 @@ PASSPHRASE = "correct horse battery staple"
 PLAINTEXT = '{"claudeAiOauth":{"accessToken":"abc","refreshToken":"def"},"mcpOAuth":{"x":1}}'
 
 # Known-answer vector: PBKDF2-HMAC-SHA256(PASSPHRASE, salt, 600000, dklen=80).
-# Locks the derivation so the bash (stdlib python3) and Python (cryptography)
-# implementations cannot silently drift apart.
+# Locks the derivation so independent crypto implementations cannot silently drift.
 KDF_SALT_HEX = "00112233445566778899aabbccddeeff"
 KDF_MATERIAL_HEX = (
     "7c0123695eb46911838d4c16fa259d7280c59060c6031130b8269b624faacd02"
@@ -135,13 +135,11 @@ def test_authenticated_frame_with_non_utf8_plaintext_rejected():
         tc.decrypt(frame, PASSPHRASE)
 
 
-# ── Interop with the real openssl binary (LibreSSL on macOS) ──────────────────
-# Mirrors exactly what credentials-helper.sh does: PBKDF2/HMAC via stdlib,
-# AES-256-CBC via `openssl enc -K/-iv -nosalt`.
+# ── Interop with the local openssl AES primitive ───────────────────────────────
 
 
 def _openssl_frame(plaintext: str, passphrase: str, salt: bytes) -> str:
-    """Produce a wire frame the way the bash script does (openssl for AES)."""
+    """Produce an authenticated frame using openssl for the AES step."""
     material = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, tc.PBKDF2_ITERATIONS, 80)
     enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
     ciphertext = subprocess.run(

@@ -1,13 +1,7 @@
 """Backend facade for AI-agent credential storage.
 
-The CLI calls ``set_backend(name)`` once based on ``--agent``, then all
-``creds.read_raw()`` / ``creds.write(...)`` calls dispatch to the active
-backend module. This keeps the call sites clean (``from
-ai_credentials_helper import credentials as creds``) while letting each
-agent own its own storage adapter.
-
-Default backend is ``claude`` (the original macOS-Keychain helper) so
-existing scripts and tests keep working.
+The default backend is Claude for compatibility. Each backend selects and
+owns its platform-appropriate storage adapter.
 """
 
 from ai_credentials_helper.backends import claude, get_backend
@@ -63,6 +57,7 @@ __all__ = [  # noqa: F822 - names dispatched dynamically via __getattr__
     "read_raw",
     "read_json",
     "write",
+    "validate_blob",
     "find_account",
     "tokens_from_data",
     "extract_oauth_tokens",
