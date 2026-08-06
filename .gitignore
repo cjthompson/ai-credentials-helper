@@ -7,3 +7,5 @@ __pycache__/
 htmlcov/
 dist/
 build/
+.claude/worktrees
+*.local.*
