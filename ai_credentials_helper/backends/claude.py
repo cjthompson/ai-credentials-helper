@@ -89,21 +89,6 @@ def parse_blob(raw: str) -> dict:
 
 
 def validate_blob(data: object) -> None:
-    """Reject parsed data that is not a usable Claude OAuth credential document."""
-    if not isinstance(data, dict):
-        raise CredentialsError(
-            f"top-level value must be a JSON object, got {type(data).__name__}"
-        )
-    oauth = data.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        raise CredentialsError("missing or non-dict 'claudeAiOauth' object")
-    for field in ("accessToken", "refreshToken"):
-        value = oauth.get(field)
-        if not isinstance(value, str) or not value:
-            raise CredentialsError(f"claudeAiOauth.{field} must be a non-empty string")
-
-
-def validate_blob(data) -> None:
     """Reject parsed payloads that aren't Claude Code credentials.
 
     Called by ``--receive`` before the keychain entry is replaced. Parsing as
@@ -117,13 +102,16 @@ def validate_blob(data) -> None:
     ``write``); this closes the same gap on the claude side.
     """
     if not isinstance(data, dict):
-        raise CredentialsError(f"top-level value must be a JSON object, got {type(data).__name__}")
+        raise CredentialsError(
+            f"top-level value must be a JSON object, got {type(data).__name__}"
+        )
     oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         raise CredentialsError("missing or non-dict 'claudeAiOauth' object")
-    access = oauth.get("accessToken")
-    if not isinstance(access, str) or not access:
-        raise CredentialsError("claudeAiOauth.accessToken must be a non-empty string")
+    for field in ("accessToken", "refreshToken"):
+        value = oauth.get(field)
+        if not isinstance(value, str) or not value:
+            raise CredentialsError(f"claudeAiOauth.{field} must be a non-empty string")
 
 
 def read_json() -> dict:

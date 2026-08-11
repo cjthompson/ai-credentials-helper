@@ -275,10 +275,16 @@ def test_receive_rejects_wrong_claude_shape_before_write(
     from ai_credentials_helper.backends import claude
 
     _fake_receive_socket(monkeypatch)
+    # decrypt() returns an envelope-wrapped payload -- _do_receive requires the
+    # agent-identity envelope unconditionally now (an unwrapped payload is
+    # rejected before shape validation even runs; see
+    # test_unlabelled_legacy_payload_rejected for that path). This test is
+    # about the shape check specifically, so it wraps the bad-shape payload
+    # the same way a real (if buggy) sender would.
     monkeypatch.setattr(
         cli.transfer_crypto,
         "decrypt",
-        lambda *_args: '{"notClaudeCredentials":true}',
+        lambda *_args: te.wrap("claude", '{"notClaudeCredentials":true}'),
     )
     writes = []
     monkeypatch.setattr(claude, "write", writes.append)

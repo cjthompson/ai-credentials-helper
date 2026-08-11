@@ -29,10 +29,6 @@ class Backend(Protocol):
         """Return the parsed JSON form of :meth:`read_raw`."""
         ...
 
-    def validate_blob(self, data: object) -> None:
-        """Reject parsed data that is not safe to write to this backend."""
-        ...
-
     def write(self, content: str) -> None:
         """Replace the active store with ``content`` in its backend-native representation."""
         ...
