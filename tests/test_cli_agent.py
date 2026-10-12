@@ -671,6 +671,7 @@ def test_unlabelled_legacy_payload_rejected(restore_backend, monkeypatch, capsys
 
 
 def test_do_send_returns_1_on_verified_mismatch_ack(restore_backend, monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_get_passphrase", lambda: "test-passphrase")
     creds.set_backend("codex")
     monkeypatch.setattr(creds, "read_raw", lambda: '{"tokens":{}}')
@@ -697,6 +698,7 @@ def test_do_send_fails_closed_on_empty_ack(restore_backend, monkeypatch, capsys)
     receiver too old to send an ack also rejects this sender's labelled
     payload, so the transfer fails at the receiver anyway.
     """
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_get_passphrase", lambda: "test-passphrase")
     creds.set_backend("codex")
     monkeypatch.setattr(creds, "read_raw", lambda: '{"tokens":{}}')
@@ -720,6 +722,7 @@ def test_do_send_fails_closed_on_unverifiable_ack(restore_backend, monkeypatch, 
     The peer's bytes must never be echoed -- they are attacker-controlled and
     would otherwise land on the sender's terminal.
     """
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_get_passphrase", lambda: "test-passphrase")
     creds.set_backend("codex")
     monkeypatch.setattr(creds, "read_raw", lambda: '{"tokens":{}}')

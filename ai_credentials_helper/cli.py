@@ -26,6 +26,8 @@ With no arguments, prints help (it does not dump credentials by default).
                    result to the store named in the sender's label. Pass
                    --agent to require a specific sender agent; a mismatch is a
                    hard error on both ends and neither store is touched.
+  --serve          Serve repeated authenticated requests without changing stores.
+  --request <host> Request and import --agent claude, codex, or all credentials.
 
 --send/--receive are end-to-end encrypted with a shared passphrase
 (CLAUDE_CREDENTIALS_PASSPHRASE, or an interactive prompt). Both ends must use
@@ -48,7 +50,7 @@ import time
 from datetime import datetime
 
 from ai_credentials_helper import credentials as creds
-from ai_credentials_helper import transfer_crypto, transfer_envelope
+from ai_credentials_helper import request_daemon, transfer_crypto, transfer_envelope
 
 log = logging.getLogger("ai_credentials_helper.cli")
 
@@ -177,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="credentials-helper",
         description="Manage OAuth credentials for supported AI agents.",
         epilog=(
-            "--send/--receive are end-to-end encrypted (AES-256-CBC + HMAC-SHA256) "
+            "TCP transfers are end-to-end encrypted (AES-256-CBC + HMAC-SHA256) "
             "with a shared passphrase. Set CLAUDE_CREDENTIALS_PASSPHRASE on both "
             "ends, or you will be prompted. A wrong passphrase or tampered payload "
             "is rejected and the active store is left unchanged. The transfer is "
@@ -190,11 +192,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true", help="log diagnostic detail to stderr")
     p.add_argument(
         "--agent",
-        choices=("claude", "codex"),
+        choices=("claude", "codex", "all"),
         default=None,
         help="which agent's credentials to operate on (default: claude; for "
              "--receive, omitting this adopts the sending agent named in the "
-             "encrypted envelope)",
+             "encrypted envelope; --request requires an agent and also accepts all)",
     )
     p.add_argument(
         "--force",
@@ -227,24 +229,31 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_PORT,
         metavar="<port>",
-        help=f"destination port for --send (default {DEFAULT_PORT})",
+        help=f"destination port for --send/--request (default {DEFAULT_PORT})",
     )
     p.add_argument(
         "--receive", action="store_true", help="accept one TCP connection, decrypt, write it"
     )
+    p.add_argument("--serve", action="store_true", help="serve repeated credential requests")
+    p.add_argument("--request", dest="request_host", metavar="<host>",
+                   help="request and import credentials from a serving host")
+    p.add_argument("--bind", metavar="<address>",
+                   help="IPv4 listening address for --serve (default: 0.0.0.0)")
     p.add_argument(
         "--port",
         dest="receive_port",
         type=int,
         default=DEFAULT_PORT,
         metavar="<port>",
-        help=f"listening port for --receive (default {DEFAULT_PORT})",
+        help=f"listening port for --receive/--serve (default {DEFAULT_PORT})",
     )
     return p
 
 
 def _validate(args: argparse.Namespace) -> str | None:
     """Return an error message if the flag combination is invalid, else None."""
+    if args.request_host is not None and not args.request_host:
+        return "Error: --request requires a nonempty host"
     primary = sum(
         [
             args.raw,
@@ -253,17 +262,36 @@ def _validate(args: argparse.Namespace) -> str | None:
             bool(args.import_path),
             bool(args.send_host),
             args.receive,
+            args.serve,
+            bool(args.request_host),
         ]
     )
     if primary > 1:
         return (
-            "Error: --raw, --simple, --refresh, --import, --send, and --receive "
+            "Error: --raw, --simple, --refresh, --import, --send, --receive, --serve, --request "
             "are mutually exclusive"
         )
     if args.oauth_only and (
         args.raw or args.simple or args.refresh or args.import_path or args.receive
+        or args.serve or args.request_host
     ):
         return "Error: --oauth-only can only be used by itself or with --send"
+    if args.request_host and args.agent is None:
+        return "Error: --request requires --agent claude, codex, or all"
+    if args.agent == "all" and not args.request_host:
+        return "Error: --agent all is only valid with --request"
+    if args.serve and args.agent is not None:
+        return "Error: --serve does not accept --agent"
+    if args.serve and args.force:
+        return "Error: --force is not valid with --serve"
+    if args.bind is not None and not args.serve:
+        return "Error: --bind is only valid with --serve"
+    if (args.serve or args.request_host) and not (
+        1 <= (args.receive_port if args.serve else args.send_port) <= 65535
+    ):
+        return "Error: port must be between 1 and 65535"
+    if args.request_host and args.request_host.startswith("-"):
+        return "Error: invalid request host"
     return None
 
 
@@ -617,18 +645,15 @@ def main(argv: list[str] | None = None) -> int:
     # resolves the back-compat default (claude) for every other mode.
     requested_agent = args.agent  # None means "not specified on the command line"
 
-    # Activate a backend before any backend call. For --receive with no
-    # --agent, this is only a *provisional* activation (claude) that
-    # _do_receive will switch away from once it learns the sender's agent
-    # via the envelope; every other mode's backend is final here. Unknown
-    # names raise ValueError; argparse already restricts --agent to the
-    # choices set.
-    creds.set_backend(_default_backend_for(requested_agent))
-
     error = _validate(args)
     if error:
         _err(error)
         return 1
+
+    # Validate before activation: `all` is a client-side operation, not a backend.
+    # One-shot receive retains its provisional Claude default until unwrapping.
+    if not (args.serve or args.request_host):
+        creds.set_backend(_default_backend_for(requested_agent))
 
     # --force only bypasses Codex validation on modes that write the local auth
     # file. Send and refresh cannot run that validation, and Claude has no
@@ -649,6 +674,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        if args.serve:
+            return request_daemon.serve(
+                args.bind if args.bind is not None else "0.0.0.0",
+                args.receive_port, _get_passphrase(), MAX_PAYLOAD
+            )
+        if args.request_host:
+            return request_daemon.request_credentials(
+                args.request_host, args.send_port, args.agent, _get_passphrase(),
+                MAX_PAYLOAD, NC_BINARY, force=args.force,
+            )
         if args.import_path:
             return _do_import(args.import_path)
         if args.send_host:
@@ -678,6 +713,10 @@ def main(argv: list[str] | None = None) -> int:
         # No mode selected (e.g. no arguments) → show help rather than dump the blob.
         parser.print_help()
         return 0
+    except KeyboardInterrupt:
+        if args.serve or args.request_host:
+            return 0 if args.serve else 130
+        raise
     except (creds.CredentialsError, OSError) as e:
         _err(f"Error: {e}")
         return 1

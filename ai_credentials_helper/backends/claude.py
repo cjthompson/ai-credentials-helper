@@ -50,12 +50,12 @@ def _require_auth_path() -> Path:
     return AUTH_PATH
 
 
-def _security(args: list[str], *, timeout: int = 5) -> subprocess.CompletedProcess:
+def _security(args: list[str], *, timeout: float = 5) -> subprocess.CompletedProcess:
     return subprocess.run(["security", *args], capture_output=True, timeout=timeout)
 
 
-def _read_raw_keychain() -> str:
-    proc = _security(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+def _read_raw_keychain(*, timeout: float = 5) -> str:
+    proc = _security(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], timeout=timeout)
     if proc.returncode != 0 or not proc.stdout:
         raise CredentialsError("No credentials found in Keychain")
     return proc.stdout.decode("utf-8", errors="replace").rstrip("\n")
