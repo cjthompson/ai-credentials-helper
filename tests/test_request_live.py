@@ -150,8 +150,13 @@ def test_large_codex_request_uses_platform_transport(tmp_path):
         assert json.loads((client_home / ".codex" / "auth.json").read_text()) == payload
         assert auth.read_bytes() == original
         daemon.send_signal(signal.SIGINT)
-        daemon.communicate(timeout=5)
+        _stdout, stderr = daemon.communicate(timeout=5)
         assert daemon.returncode == 0
+        assert b"[INFO] credential request connected: peer=127.0.0.1:" in stderr
+        assert b"credential request received: peer=127.0.0.1:" in stderr
+        assert b"agent=codex status=ok" in stderr
+        assert b"synthetic-refresh" not in stderr
+        assert b"synthetic-large-request" not in stderr
     finally:
         if daemon.poll() is None:
             daemon.kill()

@@ -100,6 +100,8 @@ Requests authenticate encrypted responses and verify a fresh request nonce and t
 
 Each connection has a 30-second exchange deadline and bounded frame sizes. Request frames are limited to 16 KiB; encrypted response frames default to 1 MiB, configurable through `CLAUDE_CREDENTIALS_MAX_PAYLOAD` on each computer. Linux/WSL requests use native sockets and macOS requests use Apple `nc`. Verbose daemon and request output reports diagnostics without printing tokens.
 
+The server logs connections, authenticated requests, and sent responses to stderr by default, including the peer address, selected agent, response status, byte count, and elapsed time. Errors use fixed codes for invalid frames or requests, timeouts, transport failures, and unavailable credentials. Logs never include credential contents, passphrases, nonces, or raw exception messages.
+
 ## Security
 
 - `--raw`, `--simple`, and verbose receive output can expose credentials in the terminal.

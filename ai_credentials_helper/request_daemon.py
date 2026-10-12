@@ -18,6 +18,26 @@ EXCHANGE_TIMEOUT = 30
 CONNECT_TIMEOUT = 10
 
 
+class FrameTooLarge(protocol.ProtocolError):
+    """A frame exceeded its configured byte limit."""
+
+
+def _connection_error_code(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, FrameTooLarge):
+        return "frame-too-large"
+    if isinstance(exc, transfer_crypto.DecryptionError):
+        return "invalid-encrypted-frame"
+    if isinstance(exc, (ValueError, RecursionError)):
+        return "invalid-request"
+    if isinstance(exc, claude.CredentialsError):
+        return "credentials-unavailable"
+    if isinstance(exc, subprocess.SubprocessError):
+        return "backend-failure"
+    return "transport-error"
+
+
 def remaining(deadline: float) -> float:
     budget = deadline - time.monotonic()
     if budget <= 0:
@@ -35,7 +55,7 @@ def read_frame(conn, limit: int, deadline: float) -> bytes:
             return b"".join(chunks)
         total += len(block)
         if total > limit:
-            raise protocol.ProtocolError("credential frame exceeds size limit")
+            raise FrameTooLarge("credential frame exceeds size limit")
         chunks.append(block)
 
 
@@ -110,12 +130,16 @@ def exchange(frame: bytes, host: str, port: int, limit: int, nc_binary: str) -> 
     raise protocol.ProtocolError("credential requests require macOS, Linux, or WSL")
 
 
-def process_connection(conn, passphrase: str, limit: int, deadline: float) -> None:
+def process_connection(conn, passphrase: str, limit: int, deadline: float,
+                       *, peer: str = "unknown") -> None:
+    started = time.monotonic()
     frame = read_frame(conn, REQUEST_LIMIT, deadline)
     text = transfer_crypto.decrypt(frame.decode("utf-8"), passphrase)
     agent, nonce = protocol.read_request(text)
+    log.info("credential request received: peer=%s agent=%s bytes=%d", peer, agent, len(frame))
     remaining(deadline)
     backend = get_backend(agent)
+    error = None
     try:
         if backend is claude and claude.KEYCHAIN_SERVICE:
             payload = claude._read_raw_keychain(timeout=min(5, remaining(deadline)))
@@ -123,19 +147,29 @@ def process_connection(conn, passphrase: str, limit: int, deadline: float) -> No
             payload = backend.read_raw()
         text = protocol.response(agent, nonce, payload=payload)
     except claude.CredentialsError:
-        text = protocol.response(agent, nonce, error="credentials-unavailable")
+        error = "credentials-unavailable"
     except (OSError, ValueError, subprocess.SubprocessError):
-        text = protocol.response(agent, nonce, error="backend-failure")
+        error = "backend-failure"
+    if error:
+        log.warning("credential request error: peer=%s agent=%s code=%s", peer, agent, error)
+        text = protocol.response(agent, nonce, error=error)
     remaining(deadline)
     response = transfer_crypto.encrypt(text, passphrase).encode()
     if len(response) > limit:
+        error = "backend-failure"
+        log.warning("credential response error: peer=%s agent=%s code=response-too-large",
+                    peer, agent)
         response = transfer_crypto.encrypt(
-            protocol.response(agent, nonce, error="backend-failure"), passphrase
+            protocol.response(agent, nonce, error=error), passphrase
         ).encode()
         if len(response) > limit:
-            raise protocol.ProtocolError("credential frame exceeds size limit")
+            raise FrameTooLarge("credential frame exceeds size limit")
     send_frame(conn, response, deadline)
-    log.debug("credential request: agent=%s response sent", agent)
+    log.info(
+        "credential response sent: peer=%s agent=%s status=%s code=%s bytes=%d elapsed_ms=%.0f",
+        peer, agent, "error" if error else "ok", error or "none", len(response),
+        (time.monotonic() - started) * 1000,
+    )
 
 
 def serve(bind: str, port: int, passphrase: str, limit: int) -> int:
@@ -150,12 +184,15 @@ def serve(bind: str, port: int, passphrase: str, limit: int) -> int:
                 conn, peer = listener.accept()
                 deadline = time.monotonic() + EXCHANGE_TIMEOUT
                 with conn:
+                    peer_label = f"{peer[0]}:{peer[1]}"
+                    log.info("credential request connected: peer=%s", peer_label)
                     try:
-                        process_connection(conn, passphrase, limit, deadline)
+                        process_connection(conn, passphrase, limit, deadline, peer=peer_label)
                     except (OSError, ValueError, RecursionError, transfer_crypto.DecryptionError,
-                            subprocess.SubprocessError, claude.CredentialsError):
+                            subprocess.SubprocessError, claude.CredentialsError) as exc:
                         # Never log exception text: it can contain credentials or peer bytes.
-                        log.debug("credential request: peer=%s connection failed", peer)
+                        log.warning("credential request failed: peer=%s code=%s",
+                                    peer_label, _connection_error_code(exc))
     except KeyboardInterrupt:
         return 0
 

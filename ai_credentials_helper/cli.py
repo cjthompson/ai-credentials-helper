@@ -668,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         _err("WARNING: --force set; skipping backend write-time safety checks")
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
+        level=logging.DEBUG if args.verbose else (logging.INFO if args.serve else logging.WARNING),
         format="[%(levelname)s] %(message)s",
         stream=sys.stderr,
     )

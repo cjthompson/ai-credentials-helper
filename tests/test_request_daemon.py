@@ -82,10 +82,16 @@ def test_backend_errors_are_authenticated_and_sanitized(monkeypatch, caplog, exc
 
     monkeypatch.setattr(claude, "read_raw", fail)
     conn = request_connection()
-    d.process_connection(conn, PW, 1024 * 1024, time.monotonic() + 5)
+    with caplog.at_level("INFO", logger=d.__name__):
+        d.process_connection(conn, PW, 1024 * 1024, time.monotonic() + 5,
+                             peer="127.0.0.1:12345")
     text = crypto.decrypt(conn.sent.decode(), PW)
     assert p.read_response(text, "claude", NONCE) == (None, code)
-    assert "secret-at" not in text + caplog.text
+    assert f"peer=127.0.0.1:12345 agent=claude code={code}" in caplog.text
+    assert f"status=error code={code}" in caplog.text
+    for secret in ("secret-at", PW, NONCE):
+        assert secret not in caplog.text
+    assert "secret-at" not in text
 
 
 def test_keychain_timeout_uses_remaining_budget(monkeypatch):
@@ -318,6 +324,9 @@ def test_listener_recovers_from_invalid_timeout_and_disconnect(monkeypatch, capl
     assert listener.closed
     assert p.read_response(crypto.decrypt(valid.sent.decode(), PW), "claude", NONCE)[0] == CLAUDE
     assert "secret-at" not in caplog.text
+    assert "credential request connected: peer=127.0.0.1:50000" in caplog.text
+    for code in ("invalid-encrypted-frame", "timeout", "transport-error"):
+        assert f"code={code}" in caplog.text
 
 
 def test_listener_interrupt_closes_active_connection(monkeypatch):
@@ -392,3 +401,39 @@ def test_request_transport_dispatch(monkeypatch, platform, transport):
     monkeypatch.setattr(d, transport, lambda *args: calls.append(args) or b"reply")
     assert d.exchange(b"frame", "host", 123, 10000, "apple-nc") == b"reply"
     assert calls[0][:4] == (b"frame", "host", 123, 10000)
+
+
+def test_server_logs_request_and_response_without_secrets(monkeypatch, caplog):
+    monkeypatch.setattr(claude, "KEYCHAIN_SERVICE", None)
+    monkeypatch.setattr(claude, "read_raw", lambda: CLAUDE)
+    with caplog.at_level("INFO", logger=d.__name__):
+        d.process_connection(request_connection(), PW, 10000, time.monotonic() + 5,
+                             peer="127.0.0.1:12345")
+    assert "credential request received: peer=127.0.0.1:12345 agent=claude bytes=" in caplog.text
+    assert "credential response sent: peer=127.0.0.1:12345 agent=claude status=ok" in caplog.text
+    assert "bytes=" in caplog.text and "elapsed_ms=" in caplog.text
+    for secret in ("secret-at", "secret-rt", PW, NONCE, CLAUDE):
+        assert secret not in caplog.text
+
+
+def test_server_logs_oversized_response_as_error(monkeypatch, caplog):
+    monkeypatch.setattr(claude, "KEYCHAIN_SERVICE", None)
+    monkeypatch.setattr(claude, "read_raw", lambda: CLAUDE * 100)
+    conn = request_connection()
+    with caplog.at_level("INFO", logger=d.__name__):
+        d.process_connection(conn, PW, 1000, time.monotonic() + 5)
+    assert p.read_response(crypto.decrypt(conn.sent.decode(), PW), "claude", NONCE) == (
+        None, "backend-failure"
+    )
+    assert "code=response-too-large" in caplog.text
+    assert "status=error code=backend-failure" in caplog.text
+    assert "secret-at" not in caplog.text
+
+
+@pytest.mark.parametrize("exc,code", [
+    (d.FrameTooLarge("secret-at"), "frame-too-large"),
+    (p.ProtocolError("secret-at"), "invalid-request"),
+    (UnicodeDecodeError("utf-8", b"secret-at", 0, 1, "secret-at"), "invalid-request"),
+])
+def test_connection_error_codes_do_not_include_peer_data(exc, code):
+    assert d._connection_error_code(exc) == code
