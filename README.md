@@ -76,6 +76,32 @@ For Claude transfers from macOS to Linux/WSL, the receiver converts a hex-encode
 
 The receiver may omit `--agent` entirely — it adopts whichever agent the sender labeled the transfer with, and prints `Detected agent: <name> (from sender)` before writing. Passing a `--agent` that differs from the sender's is a hard error on both ends: the receiver's store is left untouched and the sender's exit code reflects the rejection. Both ends must be running a version of this tool that supports this agent label; an older, unlabelled payload is rejected outright.
 
+## Persistent credential requests
+
+Run a serving helper on the computer that already holds your credentials:
+
+```bash
+export CLAUDE_CREDENTIALS_PASSPHRASE='same-secret-on-both-machines'
+credentials-helper --serve
+```
+
+On the requesting computer, use the same passphrase and select the stores to import:
+
+```bash
+export CLAUDE_CREDENTIALS_PASSPHRASE='same-secret-on-both-machines'
+credentials-helper --request 192.168.1.42 --agent all
+```
+
+`--agent` is required for requests and accepts `claude`, `codex`, or `all`. The daemon reads the selected credentials on each request and never changes its own stores. It keeps serving until Ctrl-C, including after failed requests or unavailable credentials. Interactive launches can prompt for the passphrase; noninteractive launches require the environment variable.
+
+The daemon listens on all IPv4 interfaces by default. Use `--bind <LAN-or-VPN-address>` to select an interface and `--port` to change its port. The requester uses `--send-port` to match that port. Anyone with the shared passphrase can request either backend. Both computers must run a version supporting these request modes; existing one-shot transfers still work as before.
+
+Requests authenticate encrypted responses and verify a fresh request nonce and the agent labels before importing. `all` attempts Claude followed by Codex even if Claude fails, reports each outcome, and exits nonzero if either request or import fails. A successful import remains in place if the other agent fails. Codex expiry validation applies; `--force` can deliberately bypass that check on the requester while retaining shape validation.
+
+Each connection has a 30-second exchange deadline and bounded frame sizes. Request frames are limited to 16 KiB; encrypted response frames default to 1 MiB, configurable through `CLAUDE_CREDENTIALS_MAX_PAYLOAD` on each computer. Linux/WSL requests use native sockets and macOS requests use Apple `nc`. Verbose daemon and request output reports diagnostics without printing tokens.
+
+The server logs connections, authenticated requests, and sent responses to stderr by default, including the peer address, selected agent, response status, byte count, and elapsed time. Errors use fixed codes for invalid frames or requests, timeouts, transport failures, and unavailable credentials. Logs never include credential contents, passphrases, nonces, or raw exception messages.
+
 ## Security
 
 - `--raw`, `--simple`, and verbose receive output can expose credentials in the terminal.

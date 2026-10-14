@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from ai_credentials_helper import transfer_crypto
+from ai_credentials_helper import transfer_crypto, transfer_envelope
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux storage integration")
 
@@ -61,7 +61,9 @@ def test_linux_receive_writes_configured_claude_credentials(tmp_path):
                 if time.monotonic() >= deadline or receiver.poll() is not None:
                     raise
                 time.sleep(0.05)
-        frame = transfer_crypto.encrypt(json.dumps(PAYLOAD), passphrase).encode()
+        frame = transfer_crypto.encrypt(
+            transfer_envelope.wrap("claude", json.dumps(PAYLOAD)), passphrase
+        ).encode()
         with conn:
             conn.sendall(frame)
             conn.shutdown(socket.SHUT_WR)
